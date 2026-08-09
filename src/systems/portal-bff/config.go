@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,11 @@ var (
 	// publicDir holds the built SPA assets (index.html + hashed bundles). Absent
 	// in dev, where Vite serves the SPA on its own port and proxies /api here.
 	publicDir = envOrDefault("PUBLIC_DIR", "./public")
+	// basePath mounts the SPA under a sub-path (e.g. "/app") so an ingress can route
+	// /app here without rewriting. It MUST match the PORTAL_BASE_PATH the SPA was BUILT
+	// with — Vite bakes the prefix into every asset URL, so a mismatch serves index.html
+	// and then 404s every bundle it references. Empty keeps the SPA at "/".
+	basePath = strings.TrimRight(envOrDefault("PORTAL_BASE_PATH", ""), "/")
 	// trustProxy mirrors Express's `trust proxy`: when not "false"/"0" the client
 	// IP is read from X-Forwarded-For so rate-limit buckets are per real client.
 	trustProxy    = envOrDefault("TRUST_PROXY", "1")

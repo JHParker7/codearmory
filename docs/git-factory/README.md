@@ -74,8 +74,11 @@ env var.
 | `GIT_HTTP_BASE_URL` | — | the external base URL reported as a repo's clone URL; must be reachable by a git client *outside* the cluster |
 | `GIT_STORAGE_PREFLIGHT` | `enforce` | startup verification of the storage root — see below. `warn` / `off` to downgrade |
 | `GIT_REF_LOCK_MAX_AGE` | `1h` | how long an abandoned `.lock` file may sit before the janitor clears it. `0` disables |
-| `GIT_MAINTENANCE_INTERVAL` | `1h` | how often the in-process repack loop runs. `0` disables |
+| `GIT_MAINTENANCE_INTERVAL` | `1h` | how often the repack sweep runs. Every replica ticks, but only the lease holder sweeps, so this is the interval for the *store*, not per pod. `0` disables |
+| `GIT_MAINTENANCE_LEASE_TTL` | `5m` | how long the sweep lease is granted for — i.e. how long maintenance stays blocked after a holder dies without releasing. Not a sweep budget: the holder renews while it works. Values under `1s` are refused and fall back to the default |
 | `GIT_REPO_QUOTA_MB` | `0` (unlimited) | per-repo ceiling; an oversized push is refused by `git` itself via `receive.maxInputSize` |
+| `GIT_LFS_ENABLED` | `false` | serve the Git LFS batch API and object store. Off by default because LFS needs storage headroom an operator should allocate deliberately; anything other than `true` leaves it off |
+| `GIT_LFS_MAX_OBJECT_MB` | `0` (unlimited) | per-object ceiling for an LFS upload. Enforced while streaming, so an under-declared size cannot get past it |
 | `GIT_FACTORY_INTERNAL_KEY` | — | **secret**; auth for `/internal/mirrors` + `/internal/clone-token`, shared with git_connector |
 | `GIT_FACTORY_CLONE_TOKEN_KEY` | — | **secret**; HMAC key for runner clone tokens. Rotating it invalidates outstanding clone URLs |
 | `GIT_NODE_FORWARD_KEY` | — | **secret**; node→node trust for the proxy and replication. Only needed with more than one node |

@@ -27,18 +27,45 @@ import (
 // so it works unchanged when the git plane moves to a remote node (§5 Step 3).
 
 type PullRequest struct {
-	ID          string    `gorm:"primaryKey" json:"id"`
-	RepoID      string    `gorm:"index" json:"repo_id"`
-	Number      int       `json:"number"` // per-repo, human-facing
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	SourceRef   string    `json:"source_ref"` // the branch being merged
-	TargetRef   string    `json:"target_ref"` // the branch merged into
-	State       string    `json:"state"`      // open | merged | closed
-	Author      string    `json:"author"`     // gatekeeper user_id
-	MergeCommit string    `json:"merge_commit,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID        string `gorm:"primaryKey" json:"id"`
+	RepoID    string `gorm:"index" json:"repo_id"`
+	Number    int    `json:"number"` // per-repo, human-facing
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	SourceRef string `json:"source_ref"` // the branch being merged
+	TargetRef string `json:"target_ref"` // the branch merged into
+	// SourceRepoID is the repo SourceRef lives in, for a PR opened from a fork. Empty
+	// means the same repo — the ordinary case, and what every pre-fork row reads as, so
+	// existing PRs keep working untouched. sourceRepo() resolves the two into one.
+	SourceRepoID string    `gorm:"default:''" json:"source_repo_id,omitempty"`
+	State        string    `json:"state"`  // open | merged | closed
+	Author       string    `json:"author"` // gatekeeper user_id
+	MergeCommit  string    `json:"merge_commit,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// sourceRepo is the repo the PR's source branch lives in — itself for a same-repo PR.
+func (p PullRequest) sourceRepo() string {
+	if p.SourceRepoID == "" {
+		return p.RepoID
+	}
+	return p.SourceRepoID
+}
+
+// crossRepo reports whether this PR comes from a fork.
+func (p PullRequest) crossRepo() bool {
+	return p.SourceRepoID != "" && p.SourceRepoID != p.RepoID
+}
+
+// localSourceRef is the ref to diff and merge FROM inside the target repo. For a fork
+// PR that is the scratch ref the source commits were fetched into; the branch name
+// itself means nothing in the target's object database.
+func (p PullRequest) localSourceRef() string {
+	if p.crossRepo() {
+		return crossRepoRef(p.ID)
+	}
+	return p.SourceRef
 }
 
 const (
@@ -69,6 +96,9 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		Body      string `json:"body"`
 		SourceRef string `json:"source_ref"`
 		TargetRef string `json:"target_ref"`
+		// SourceRepoID opens the PR from a FORK: the source branch lives in that repo
+		// rather than this one. Empty is the ordinary same-repo case.
+		SourceRepoID string `json:"source_repo_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -87,17 +117,17 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid branch name", http.StatusBadRequest)
 		return
 	}
-	if req.SourceRef == req.TargetRef {
+	sourceRepoID := strings.TrimSpace(req.SourceRepoID)
+	crossRepo := sourceRepoID != "" && sourceRepoID != re.ID
+	if !crossRepo && req.SourceRef == req.TargetRef {
+		// Only a conflict within ONE repo. Across repos the same branch name on each
+		// side is the normal case ("my main into your main").
 		http.Error(w, "source and target must differ", http.StatusBadRequest)
 		return
 	}
-	// Both must exist — a PR from a branch that was never pushed is a typo, and
-	// catching it here beats a confusing failure at merge time.
-	for _, ref := range []string{req.SourceRef, req.TargetRef} {
-		if !branchExists(ctx, re.ID, ref) {
-			http.Error(w, "branch "+ref+" does not exist", http.StatusBadRequest)
-			return
-		}
+	if !branchExists(ctx, re.ID, req.TargetRef) {
+		http.Error(w, "branch "+req.TargetRef+" does not exist", http.StatusBadRequest)
+		return
 	}
 
 	pr := PullRequest{
@@ -106,12 +136,46 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		State: prOpen, Author: userID,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
+
+	if crossRepo {
+		// The caller must be able to READ the source repo. Checked through the same
+		// gatekeeper path as any other access rather than trusting the id in the body —
+		// otherwise "open a PR from repo X" would be a way to copy a repo you cannot see
+		// into one you can, and then read its diff.
+		srcRepo, err := getRepoByID(ctx, sourceRepoID)
+		if err != nil {
+			http.Error(w, "source repository not found", http.StatusNotFound)
+			return
+		}
+		if _, _, ok := gatekeeperClient.CheckPermissions(ctx, &notFoundOnDeny{ResponseWriter: w}, r, "getRepo", resRepoOf(srcRepo)); !ok {
+			// notFoundOnDeny already answered; a denial reads as 404 so the existence of
+			// a private source repo is not confirmed.
+			return
+		}
+		if !branchExists(ctx, srcRepo.ID, req.SourceRef) {
+			http.Error(w, "branch "+req.SourceRef+" does not exist in the source repository", http.StatusBadRequest)
+			return
+		}
+		pr.SourceRepoID = srcRepo.ID
+		// Bring the commits across before the row exists, so a PR is never created
+		// pointing at objects this repo cannot see.
+		if err := fetchCrossRepo(ctx, re.ID, srcRepo.ID, req.SourceRef, pr.ID); err != nil {
+			slog.ErrorContext(ctx, "create pull: fetch fork ref", "Repo_id", re.ID, "source", srcRepo.ID, "error", err)
+			http.Error(w, "could not read the source branch", http.StatusBadGateway)
+			return
+		}
+	} else if !branchExists(ctx, re.ID, req.SourceRef) {
+		http.Error(w, "branch "+req.SourceRef+" does not exist", http.StatusBadRequest)
+		return
+	}
+
 	if err := connect().WithContext(ctx).Create(&pr).Error; err != nil {
 		slog.ErrorContext(ctx, "create pull", "Repo_id", re.ID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	slog.InfoContext(ctx, "pull request opened", "Repo_id", re.ID, "number", pr.Number, "author", userID)
+	notifyPullEvent(ctx, re, eventPullOpened, pr, userID)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusCreated, pr)
 }
@@ -159,18 +223,27 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 
 	out := map[string]any{"pull_request": pr}
 	if pr.State == prOpen {
+		// A fork PR's source lives in another repo, which has kept moving since the PR
+		// was opened. Refresh the scratch ref first so the diff and the mergeability
+		// verdict describe the branch as it is NOW, matching the same-repo behaviour.
+		if pr.crossRepo() {
+			if err := fetchCrossRepo(ctx, re.ID, pr.sourceRepo(), pr.SourceRef, pr.ID); err != nil {
+				slog.WarnContext(ctx, "pull: could not refresh fork ref", "Repo_id", re.ID, "number", pr.Number, "error", err)
+			}
+		}
+		src := pr.localSourceRef()
 		// Report a failure rather than omitting the key: a caller cannot distinguish
 		// "no files changed" from "we could not work it out" if the field is missing.
-		if changes, err := diffStat(ctx, re.ID, pr.TargetRef, pr.SourceRef); err == nil {
+		if changes, err := diffStat(ctx, re.ID, pr.TargetRef, src); err == nil {
 			out["files"] = changes
 		} else {
 			out["files_error"] = err.Error()
 		}
-		if patch, err := diffPatch(ctx, re.ID, pr.TargetRef, pr.SourceRef); err == nil {
+		if patch, err := diffPatch(ctx, re.ID, pr.TargetRef, src); err == nil {
 			out["diff"] = patch // the full review diff (target...source)
 		}
-		out["commits"] = commitsBetween(ctx, re.ID, pr.TargetRef, pr.SourceRef)
-		res, err := tryMerge(ctx, re.ID, pr.TargetRef, pr.SourceRef)
+		out["commits"] = commitsBetween(ctx, re.ID, pr.TargetRef, src)
+		res, err := tryMerge(ctx, re.ID, pr.TargetRef, src)
 		if err != nil {
 			res = mergeResult{Mergeable: false, Reason: err.Error()}
 		}
@@ -200,6 +273,15 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pull request is "+pr.State, http.StatusConflict)
 		return
 	}
+	// Branch protection. Enforced HERE and not only in the pre-receive hook: the hook
+	// sees pushes, and a merge through this handler never reaches it, so without this
+	// the API merge path walked straight past every rule on the target branch.
+	if err := mergeGate(ctx, re, pr); err != nil {
+		slog.InfoContext(ctx, "merge blocked by branch protection",
+			"Repo_id", re.ID, "number", pr.Number, "target", pr.TargetRef, "reason", err.Error())
+		http.Error(w, "merge blocked: "+err.Error(), http.StatusConflict)
+		return
+	}
 
 	var req struct {
 		Message string `json:"message"`
@@ -216,7 +298,15 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	// for a squash — where one commit carries every file from the branch.
 	before := refSnapshot(ctx, re.ID)
 
-	sha, err := mergeBranches(ctx, re.ID, pr.TargetRef, pr.SourceRef, msg, userID)
+	// Same refresh as the read path: merge what the fork branch points at now.
+	if pr.crossRepo() {
+		if err := fetchCrossRepo(ctx, re.ID, pr.sourceRepo(), pr.SourceRef, pr.ID); err != nil {
+			slog.ErrorContext(ctx, "pull: could not refresh fork ref before merge", "Repo_id", re.ID, "error", err)
+			http.Error(w, "could not read the source branch", http.StatusBadGateway)
+			return
+		}
+	}
+	sha, err := mergeBranches(ctx, re.ID, pr.TargetRef, pr.localSourceRef(), msg, userID)
 	if err != nil {
 		// Conflicts and races are the caller's problem to resolve, not server errors.
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -234,6 +324,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = touchRepo(ctx, re.ID)
 	notifyPush(ctx, re, userID, []string{pr.TargetRef}, before)
+	notifyPullEvent(ctx, re, eventPullMerged, pr, userID)
 	slog.InfoContext(ctx, "pull request merged", "Repo_id", re.ID, "number", pr.Number, "commit", sha)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, pr)
@@ -243,7 +334,7 @@ func handleClosePull(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleClosePull")
 	defer span.End()
 
-	re, _, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "updatePull")
+	re, userID, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "updatePull")
 	if !ok {
 		return
 	}
@@ -263,6 +354,7 @@ func handleClosePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pr.State = prClosed
+	notifyPullEvent(ctx, re, eventPullClosed, pr, userID)
 	writeJSON(w, http.StatusOK, pr)
 }
 

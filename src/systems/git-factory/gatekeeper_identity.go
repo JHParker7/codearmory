@@ -57,6 +57,25 @@ func getUser(ctx context.Context, bearerToken, userID string) (User, error) {
 	return user, nil
 }
 
+// getUserByName resolves a USERNAME to a User. gatekeeper's /users listing is the only
+// way round: it has no by-name lookup, and a namespace is a username rather than an id,
+// so a transfer addressed to "alice" has to become a user_id somehow.
+//
+// The match is exact and case-sensitive, because a namespace is a path segment: matching
+// "Alice" to "alice" here would hand the repo to a namespace that does not route.
+func getUserByName(ctx context.Context, bearerToken, username string) (User, error) {
+	var users []User
+	if err := gatekeeperGet(ctx, bearerToken, "/users", &users); err != nil {
+		return User{}, fmt.Errorf("list users: %w", err)
+	}
+	for _, u := range users {
+		if u.Username == username {
+			return u, nil
+		}
+	}
+	return User{}, fmt.Errorf("no user named %q", username)
+}
+
 // gatekeeperGet issues an authenticated GET to gatekeeper and decodes the JSON body
 // into out. It maps gatekeeper's HTTP status codes onto Go errors.
 func gatekeeperGet(ctx context.Context, bearerToken, path string, out any) error {

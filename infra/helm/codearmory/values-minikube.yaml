@@ -1,0 +1,130 @@
+# Local minikube values.
+#
+# Two things make this a LOCAL install rather than a shrunken production one:
+#
+#   - imageRegistry is empty and every tag is "local", so the images loaded into the
+#     minikube daemon (`minikube image load <svc>:local`) are used as-is. With the
+#     default registry prefix, Kubernetes would try to pull docker.io/jhp73/... and fail —
+#     minikube here has no route to registry.k8s.io, let alone a private registry.
+#   - imagePullPolicy is IfNotPresent for the same reason: Always would ignore the
+#     locally-loaded image and go to the network.
+#
+# Everything else is left at the chart's defaults so this exercises the real
+# deployment path rather than a special-cased one.
+
+imageRegistry: ""
+imageTag: local
+imagePullPolicy: IfNotPresent
+
+# The bundled Bitnami subchart provisions the core service databases via its initdb
+# script, which is what the chart expects on a fresh install.
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: postgres
+  primary:
+    persistence:
+      size: 4Gi
+
+# One replica each: this is a single-node cluster, and the point is to see the whole
+# platform running rather than to test scheduling.
+gatekeeper:
+  replicaCount: 1
+  # An explicit bootstrap admin, because the "first user becomes admin" fallback does
+  # NOT fire on this platform: gatekeeper seeds the reserved `codearmory` system account
+  # at startup, and instanceUserCount counts every row in `users` — so by the time a
+  # human signs up the count is already 1 and nobody is ever granted admin. Setting these
+  # two also disables that fallback explicitly, which is the intended production path.
+  env:
+    adminEmail: admin@local.test
+    adminUsername: admin
+  secret:
+    # Local dev only. A real deployment supplies this from a secret store.
+    adminPassword: LocalAdmin!23
+  # E2E headroom. The signup/login limiters are per SOURCE IP, and every test client
+  # arrives through one port-forward — so the whole suite looks like a single abusive
+  # client and exhausts a production-shaped budget during fixture setup. Raised HERE
+  # only; the chart defaults (10 signups / 10 min, 5 logins / min) are the right
+  # production values.
+  extraEnv:
+    - name: SIGNUP_RATE_LIMIT
+      value: "500"
+    - name: SIGNUP_RATE_WINDOW
+      value: "1m"
+    - name: LOGIN_RATE_LIMIT
+      value: "500"
+    - name: LOGIN_RATE_WINDOW
+      value: "1m"
+registry:
+  replicaCount: 1
+conductor:
+  replicaCount: 1
+  # Reached by port-forward on 8080; no ingress needed for a local bring-up.
+  service:
+    type: ClusterIP
+portal:
+  replicaCount: 1
+  # Must match the PORTAL_BASE_PATH the image was built with (see platformIngress).
+  basePath: /app
+  # A DISTINCT tag, not ":local" like the other services: the base path is baked into
+  # the SPA bundle at build time, so this image is not interchangeable with the
+  # root-mounted one. Reusing ":local" also meant `minikube image load` silently kept
+  # the previously-cached layer under that tag, and the pod went on serving the old
+  # build with the new env var — correct config, wrong bytes.
+  image:
+    tag: app
+
+# git_factory keeps its own PVC here rather than the JuiceFS RWX claim — that setup
+# lives in infra/local/juicefs and is a separate exercise. One replica, so ReadWriteOnce
+# is correct and the chart's replicas>1-without-RWX guard is satisfied.
+gitFactory:
+  replicaCount: 1
+  persistence:
+    size: 4Gi
+  # Its own tag so Helm owns the field. Setting it with `kubectl set image` instead
+  # hands ownership to the "kubectl-set" field manager, and the next `helm upgrade`
+  # fails with an apply conflict rather than overwriting it.
+  image:
+    tag: e2e
+
+# Forge runs exec containers; on minikube the Kubernetes runtime is the honest choice
+# (the Docker runtime would need the node's docker socket mounted in).
+forge:
+  replicaCount: 1
+
+# The registry mirror's SEED job is off here, and the reason is worth stating because it
+# is not a preference: this minikube node has no outbound network (`curl https://quay.io`
+# from inside the node fails to resolve). The seed job pulls skopeo from quay.io and uses
+# it to copy base images from public.ecr.aws — so on an isolated node it can neither
+# start nor do anything useful if it did, and as a post-install HOOK its failure fails
+# the whole `helm install` around an otherwise healthy platform.
+#
+# The mirror itself stays up; it is simply empty, and builds fall back to the origin
+# registry exactly as the chart documents. Re-enable this on any cluster with egress.
+registryMirror:
+  seed:
+    enabled: false
+
+# outpost-gateway is enabled here because the registry manifest registers it
+# UNCONDITIONALLY while its Deployment is guarded by this flag (default false). Left off,
+# conductor health-checks a service that was never deployed and the platform reports 503
+# — so on this chart the two settings are effectively coupled. Enabling it is the
+# smaller change; the alternative is stripping the entry from the manifest when disabled.
+outpostGateway:
+  enabled: true
+  replicaCount: 1
+
+# Single front door on the nginx ingress: /api → conductor, /app → portal, / → /app.
+# The portal image below is built with PORTAL_BASE_PATH=/app to match; see the note on
+# platformIngress in values.yaml for why that is a build-time concern, not just routing.
+platformIngress:
+  enabled: true
+  className: nginx
+  hosts:
+    - ""
+    # A named host as well as the catch-all: a pre-existing Ingress in the `gitfactory`
+    # namespace also claims "/" on the wildcard host and, being older, wins the nginx
+    # location ordering. A named host gets its own server block, so the root redirect is
+    # reachable there regardless. Remove once that Ingress is gone.
+    - "ca.local"
+  rootRedirectTo: /app

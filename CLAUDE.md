@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ### Unit tests
-Each service is tested independently. The Go workspace is at `src/systems/`; the CLI is a separate module at `src/cli/`.
+Each service is tested independently. The Go workspace is at `src/systems/`; the CLI, the Terraform provider and the CI pruner are separate modules (see "Go workspace").
 
 ```bash
 cd src/systems/<service> && go test .      # e.g. gatekeeper, workflows, events
@@ -13,12 +13,19 @@ cd src/cli && go test .
 
 # Run a single test
 cd src/systems/gatekeeper && go test -run TestCreateOrg_Success .
+
+# The Terraform provider has no tests yet — it is build-checked only.
+cd src/providers/terraform-provider-codearmory && go build ./...
 ```
 
 ### Build
 ```bash
 cd src/systems/<service> && go build ./...
 cd src/cli && go build -o armory .
+
+# Docker parity: service images build in module mode, so verify that way too —
+# a plain `go build` passes even when the module's own go.sum is incomplete.
+cd src/systems/<service> && GOWORK=off go build ./...
 ```
 
 ### Local stack
@@ -57,7 +64,7 @@ Commits must follow Conventional Commits format (`feat:`, `fix:`, `chore:`, etc.
 ## Architecture
 
 ### Repository scope (core monorepo + spun-off services)
-This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal, workflows, forge, **git_connector** (the credential broker), **git_factory** (the platform's own git host), **events** (the event collector/reactor, which absorbed the former `hooks` service), the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). The **git_connector** service (registered/routed as `git_connector`; in-repo directory is still `src/systems/git`) is the core git integration — a backend-agnostic **credential broker** that mints short-lived clone credentials for whatever backend a repo lives on (GitHub, GitLab, Forgejo, generic). **git_factory** (`src/systems/git-factory`, port `9002`) is the git plane itself — repositories plus Smart-HTTP — and is one of git_connector's backends. Mind the naming: its directory and Go module are `git-factory`, but its **service identity is `codearmory_git_factory`** — the name it registers under, the first segment of every RBAC resource (`codearmory_git_factory/repos`), and the key every grant is written against. Never rename the identity; doing so invalidates existing grants. **tickets**, **containers (docker registry)** and **git_factory** are also **core** and **in-repo** (`src/systems/tickets`, `src/systems/containers`, `src/systems/git-factory`) — built by the monorepo CI, the Helm chart deploys those images and they are registered via the registry manifest (they have no builder def). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, mcp, notifications**, and **gitea_integration** (Forgejo/Gitea repo management — demoted from core because most users do not run Forgejo) — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
+This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal (SPA + the Go **portal-bff** that serves it), workflows, forge, **artifacts** (the blob store), **git_connector** (the credential broker), **git_factory** (the platform's own git host), **events** (the event collector/reactor, which absorbed the former `hooks` service), the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). The **git_connector** service (registered/routed as `git_connector`; in-repo directory is still `src/systems/git`) is the core git integration — a backend-agnostic **credential broker** that mints short-lived clone credentials for whatever backend a repo lives on (GitHub, GitLab, Forgejo, generic). **git_factory** (`src/systems/git-factory`, port `9002`) is the git plane itself — repositories plus Smart-HTTP — and is one of git_connector's backends. Mind the naming: its directory and Go module are `git-factory`, but its **service identity is `codearmory_git_factory`** — the name it registers under, the first segment of every RBAC resource (`codearmory_git_factory/repos`), and the key every grant is written against. Never rename the identity; doing so invalidates existing grants. **tickets**, **containers (docker registry)**, **artifacts** and **git_factory** are also **core** and **in-repo** (`src/systems/tickets`, `src/systems/containers`, `src/systems/artifacts`, `src/systems/git-factory`) — built by the monorepo CI, the Helm chart deploys those images and they are registered via the registry manifest (they have no builder def). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, mcp, notifications**, and **gitea_integration** (Forgejo/Gitea repo management — demoted from core because most users do not run Forgejo) — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
 
 ### Request flow
 Every external request enters through **Conductor** (`:8080`), the API gateway. Conductor polls **Registry** (`:8082`) every ~5 minutes for service manifests that define routes, actions, and RBAC resources. Conductor verifies permissions with **Gatekeeper** (`:8081`) before forwarding each request to the target backend.
@@ -90,7 +97,7 @@ Note a resource **leading with the service name** is always unscoped: `tickets/t
 Every backend service calls `registry.StartKeyRotation(ctx, gatekeeperURL, "<service-name>", secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)` on startup (from the in-repo shared SDK at `src/systems/sdk`). This registers the service with Gatekeeper and rotates the shared key every 25 minutes. The initial key is set in `GATEKEEPER_SERVICE_KEY` and must match the corresponding entry in Gatekeeper's `GATEKEEPER_SERVICES` env var.
 
 ### Database pattern
-All GORM-based services in this repo (`gatekeeper`, `events`, `workflows`, `git`, `tickets`, `containers`) — plus the builder-deployed `gitea_integration` — use the same pattern:
+All GORM-based services in this repo (`gatekeeper`, `events`, `workflows`, `git`, `git-factory`, `tickets`, `containers`, `artifacts`) — plus the builder-deployed `gitea_integration` — use the same pattern:
 - A `db` interface with `Add / Update / Remove / Get / List` methods implemented on each entity struct
 - Lazy-initialized `gormDB` / `gormDBRead` singletons via `connect()` / `connectRead()`
 - `CREATE TABLE IF NOT EXISTS` auto-migration on startup — no separate migration step
@@ -101,7 +108,7 @@ All GORM-based services in this repo (`gatekeeper`, `events`, `workflows`, `git`
 All services use the pattern `secret("NAME")` which checks `${NAME}_FILE` first (for k8s volume-mounted secrets), then falls back to the env var `NAME`.
 
 ### Go workspace
-`src/systems/go.work` covers the in-repo backend services as a single workspace (including `outpost-gateway`, the `outpost` agent, and the shared `sdk` module; spun-off services live in their own repos and are not in this workspace). The CLI (`src/cli/`) is a separate module.
+`src/systems/go.work` covers the in-repo backend services as a single workspace (including `artifacts`, `portal-bff`, `outpost-gateway`, the `outpost` agent, and the shared `sdk` module; spun-off services live in their own repos and are not in this workspace). Three in-repo Go modules are deliberately **outside** it: the CLI (`src/cli/`), the Terraform provider (`src/providers/terraform-provider-codearmory/`), and the CI pruner (`infra/ci/`) — so each is built and tested on its own.
 
 **Do not run `go work sync`.** It rewrites each module's `go.mod` to the workspace-wide build list but leaves the corresponding hashes in `go.work.sum` rather than the module's own `go.sum`. Workspace builds keep working, so it looks harmless — but Docker builds run in module mode (`GOWORK=off`, no `go.work` in the build context) and fail with `missing go.sum entry`. If you need to align a dependency, change it in the module and run `GOWORK=off go mod tidy` there, which is what keeps each `go.sum` self-sufficient. Verify with `GOWORK=off go build ./...`, since a plain `go build` will not catch it.
 
@@ -127,6 +134,10 @@ The MCP server (spun off to its own `codearmory-mcp` repo) is a stdio-based MCP 
 ```
 src/
   cli/              armory CLI (cobra, separate Go module)
+  providers/
+    terraform-provider-codearmory/   Terraform provider (separate Go module) — orgs,
+                    teams, roles, secrets, pipelines/steps, git backends + repos,
+                    runner classes, container registries, event triggers, boards, outposts
   systems/          (core services only — see "Repository scope")
     conductor/      API gateway — routing, auth forwarding, key rotation
     gatekeeper/     Auth, RBAC, orgs, teams, roles, sessions, OIDC provider
@@ -140,15 +151,19 @@ src/
     events/         Event collector + reactor — envelope intake, field-filtered triggers, actions, webhook adapters
     tickets/        Issue/ticket tracker — boards, tickets, comments, custom fields
     containers/     Docker registry proxy — per-tenant image repositories
+    artifacts/      Blob store (`:8097`) — per-user artifacts with scoped quotas; fs or S3 backend
     outpost-gateway/ Outpost-facing connection point + Postgres event backbone
     outpost/        User-deployed in-cluster agent (only K8s code)
-    portal/         Web app — React SPA + Express BFF (Node, not Go); proxies /api to conductor
+    portal/         React SPA sources only (no server) — built by portal-bff's Dockerfile
+    portal-bff/     Go server for the portal — serves the built SPA and proxies /api to conductor
     sdk/            Shared library every service replaces to ../sdk — gatekeeper checks + audit, key rotation, telemetry
 infra/
   local/            Docker Compose stack for local development
     registry-manifest.json   Service route/action/RBAC definitions
   helm/codearmory/  Production Helm chart (core services; builder deploys the rest)
   helm/outpost/     User-installable chart for the outpost agent
+  ci/               Registry-pruning CI tool. Its own tiny module, deliberately OUTSIDE
+                    the workspace and dependency-free — CI runs it with `go run ./infra/ci`
 tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```

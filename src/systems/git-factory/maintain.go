@@ -198,14 +198,12 @@ func gcRepo(ctx context.Context, repoID string) (ran bool, err error) {
 	return true, nil
 }
 
-// runMaintenance sweeps every repo once. Errors are per-repo and never abort the
+// runMaintenanceWhile sweeps every repo once. Errors are per-repo and never abort the
 // sweep: one broken repository must not stop the rest from being repacked.
-func runMaintenance(ctx context.Context) (swept, skipped, locksCleared int) {
-	return runMaintenanceWhile(ctx, func() bool { return true })
-}
-
-// runMaintenanceWhile is runMaintenance with an abort condition consulted between
-// repos. The leased sweep uses it to stop once it no longer holds the lease.
+//
+// keepGoing is consulted between repos and stops the sweep when it returns false. The
+// leased sweep uses it to give up once it no longer holds the lease; pass a function
+// returning true to sweep unconditionally.
 func runMaintenanceWhile(ctx context.Context, keepGoing func() bool) (swept, skipped, locksCleared int) {
 	ids, err := listAllRepoIDs(ctx)
 	if err != nil {
@@ -269,7 +267,7 @@ func startMaintenance(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runLeasedSweep(ctx, holder, ttl)
+				runLeasedSweep(ctx, holder, ttl, interval)
 			}
 		}
 	}()
@@ -277,9 +275,14 @@ func startMaintenance(ctx context.Context) {
 
 // runLeasedSweep runs one sweep, but only if this replica wins the lease for it.
 //
-// Every replica ticks and every replica calls this; at most one of them does any work.
-// See lease.go for why that is a cost mechanism rather than a safety one.
-func runLeasedSweep(ctx context.Context, holder string, ttl time.Duration) {
+// Every replica ticks and every replica calls this; at most one of them does any work,
+// and — via the cooldown at the end — at most one sweep happens per interval however
+// many replicas are ticking. See lease.go for why that is a cost mechanism rather than
+// a safety one.
+//
+// interval is the maintenance interval, used for the completion cooldown rather than
+// for scheduling; ttl is the lease TTL, which governs takeover after a holder dies.
+func runLeasedSweep(ctx context.Context, holder string, ttl, interval time.Duration) {
 	got, err := acquireLease(ctx, maintenanceLeaseName, holder, ttl)
 	if err != nil {
 		// Skip the tick. A sweep needs the database anyway — listAllRepoIDs is its
@@ -306,6 +309,9 @@ func runLeasedSweep(ctx context.Context, holder string, ttl time.Duration) {
 	renewing.Add(1)
 	go func() {
 		defer renewing.Done()
+		// A third of the TTL, so two renewals may fail before the lease lapses.
+		// Non-positive would panic here; maintenanceLeaseTTL guarantees it cannot be,
+		// by refusing any TTL below minMaintenanceLeaseTTL.
 		t := time.NewTicker(ttl / 3)
 		defer t.Stop()
 		for {
@@ -343,10 +349,21 @@ func runLeasedSweep(ctx context.Context, holder string, ttl time.Duration) {
 		return
 	}
 
-	// Release rather than sit on it until the TTL: the next tick should be free to land
-	// on any replica.
-	if err := releaseLease(ctx, maintenanceLeaseName, holder); err != nil {
-		slog.WarnContext(ctx, "maintenance: could not release the sweep lease", "error", err)
+	if ctx.Err() != nil {
+		// Shutdown cut the sweep short, so the store was NOT fully covered. Release
+		// rather than cool down: the next replica to tick should be allowed to finish
+		// the job instead of waiting out an interval nothing swept.
+		if err := releaseLease(ctx, maintenanceLeaseName, holder); err != nil {
+			slog.WarnContext(ctx, "maintenance: could not release the sweep lease", "error", err)
+		}
+		return
+	}
+
+	// Hold the lease until the next sweep is due. Releasing here would let the next
+	// replica to tick sweep the same store again within the same interval — see
+	// coolDownLease.
+	if err := coolDownLease(ctx, maintenanceLeaseName, holder, interval); err != nil {
+		slog.WarnContext(ctx, "maintenance: could not set the sweep cooldown", "error", err)
 	}
 	slog.InfoContext(ctx, "maintenance: sweep complete",
 		"repacked", swept, "skipped_busy", skipped, "stale_locks_cleared", locks)

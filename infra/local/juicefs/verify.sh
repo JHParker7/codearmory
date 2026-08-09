@@ -133,6 +133,71 @@ res=$(inA 'ok=0; bad=0
 set -- $res
 [[ "${2:-1}" == "0" ]] && ok "$1 repos fsck clean, 0 damaged" || bad "$2 repos failed fsck"
 
+say "6. The store is swept once per interval, not once per replica"
+# The other half of running N replicas against one store. Sections 1-5 cover whether
+# concurrent access is SAFE; this covers whether it is affordable. Every replica ticks
+# the maintenance loop, so without the lease in git-factory/lease.go each one walks the
+# whole store every interval — N times the repack cost for the same work, and it gets
+# worse exactly as the HPA scales out.
+#
+# Note this cannot be checked by watching for overlap: replicas tick on their own
+# offsets, so the failure is usually sweeps that are SEQUENTIAL and redundant rather
+# than simultaneous. Counting completions over a window is what distinguishes them.
+# The service logs JSON (main.go uses slog.NewJSONHandler), hence the quoted form —
+# a logfmt-style `lease_holder=...` match would silently find nothing and report 0.
+holders=$(for p in "$A" "$B"; do
+  kubectl logs -n "$NS" "$p" -c git-factory 2>/dev/null \
+    | grep -o '"lease_holder":"[^"]*"' | head -1
+done | sort -u | wc -l)
+# Two replicas must present two identities, or renewal and release cross-talk: a pod
+# would be able to renew or release a lease another pod holds.
+[[ "$holders" == "2" ]] && ok "the two pods use distinct lease holder ids" \
+  || bad "the pods reported $holders distinct lease_holder ids — want 2"
+
+interval=$(kubectl get deploy/git-factory -n "$NS" \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GIT_MAINTENANCE_INTERVAL")].value}')
+# Only the two forms this deployment actually uses, matched whole. A compound Go
+# duration like "2h30m" must not be half-parsed into a number — anything unrecognised
+# falls through to a value that trips the skip below rather than being guessed at.
+if [[ "$interval" =~ ^([0-9]+)s$ ]]; then
+  isecs=${BASH_REMATCH[1]}
+elif [[ "$interval" =~ ^([0-9]+)m$ ]]; then
+  isecs=$(( ${BASH_REMATCH[1]} * 60 ))
+else
+  isecs=99999
+fi
+
+sweeps() { # total "sweep complete" lines across both pods
+  local n=0
+  for p in "$A" "$B"; do
+    c=$(kubectl logs -n "$NS" "$p" -c git-factory 2>/dev/null | grep -c 'maintenance: sweep complete' || true)
+    n=$(( n + c ))
+  done
+  echo "$n"
+}
+
+if (( isecs > 120 )); then
+  # Deliberately not a failure. Against a production-shaped interval this check would
+  # take hours; 50-git-factory.yaml sets 30s locally precisely so it can run.
+  printf '  \033[33mSKIP\033[0m GIT_MAINTENANCE_INTERVAL=%s is too long to observe (set 30s to check this)\n' "${interval:-unset}"
+else
+  window=$(( isecs * 3 + 10 ))
+  before=$(sweeps)
+  echo "  watching for ${window}s (3 x ${isecs}s intervals, 2 replicas)"
+  sleep "$window"
+  after=$(sweeps)
+  did=$(( after - before ))
+  # One sweep per interval, plus one for landing mid-interval at either end. Two
+  # replicas sweeping unguarded would produce roughly double this.
+  if (( did >= 1 && did <= 4 )); then
+    ok "$did sweeps across both pods in 3 intervals (one replica per interval)"
+  elif (( did < 1 )); then
+    bad "no sweep completed in ${window}s — maintenance is not running at all"
+  else
+    bad "$did sweeps across both pods in 3 intervals — want <=4; every replica is sweeping the whole store"
+  fi
+fi
+
 say "Result"
 if [[ "$fails" == "0" ]]; then
   echo "All cross-pod checks passed."

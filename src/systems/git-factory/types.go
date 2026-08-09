@@ -20,18 +20,18 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 // URL. The stable ID — not the namespace or name — keys the bytes on disk, which
 // is what makes a rename metadata-only (ARCHITECTURE §4).
 type Repo struct {
-	ID            string    `gorm:"primaryKey" json:"id"`                           // uuid, stable, used in RBAC resource
-	Owner         string    `gorm:"index" json:"-"`                                 // gatekeeper user_id — ownership filter (indexed for owner-scoped list/get)
-	Namespace     string    `gorm:"uniqueIndex:ux_namespace_name" json:"namespace"` // org name or username — the clone-URL path segment
-	Name          string    `gorm:"uniqueIndex:ux_namespace_name" json:"name"`
-	Description   string    `json:"description"`
-	DefaultBranch string    `gorm:"default:main" json:"default_branch"`
-	Shard         string    `gorm:"serializer:json" json:"-"` // v2+: which git-node holds the bytes
+	ID            string `gorm:"primaryKey" json:"id"`                           // uuid, stable, used in RBAC resource
+	Owner         string `gorm:"index" json:"-"`                                 // gatekeeper user_id — ownership filter (indexed for owner-scoped list/get)
+	Namespace     string `gorm:"uniqueIndex:ux_namespace_name" json:"namespace"` // org name or username — the clone-URL path segment
+	Name          string `gorm:"uniqueIndex:ux_namespace_name" json:"name"`
+	Description   string `json:"description"`
+	DefaultBranch string `gorm:"default:main" json:"default_branch"`
+	Shard         string `gorm:"serializer:json" json:"-"` // v2+: which git-node holds the bytes
 	// Visibility is the ONE per-record fact that can authorize a caller who holds no
 	// grant at all: "public" makes reads — a clone above all — available to anyone,
 	// while every write still goes through gatekeeper. Default private, so a repo is
 	// never published by omission (an unset column on an old row reads as private).
-	Visibility    string    `gorm:"default:private" json:"visibility"`
+	Visibility string `gorm:"default:private" json:"visibility"`
 	// Project files the repo into a gatekeeper Project so a project role grants access
 	// to every repo in it at once (see the monorepo docs/projects/design.md). Project
 	// is the slug for display/filtering; ProjectID (stable) widens repo lists cheaply;
@@ -45,13 +45,19 @@ type Repo struct {
 	// approximation from git's own object accounting, refreshed on the events that
 	// change it rather than walked on read. 0 means "never measured" (a repo created
 	// before the column existed, or one never pushed to), not "empty".
-	SizeBytes     int64     `gorm:"default:0" json:"size_bytes"`
+	SizeBytes int64 `gorm:"default:0" json:"size_bytes"`
 	// Kind is "native" (born here, push-authoritative — the default and today's only
 	// behaviour) or "mirror" (a cached copy of UpstreamURL, refreshed by fetching it).
 	// A mirror is READ-ONLY over the wire: receive-pack is refused, because its source
 	// of truth is upstream, not a client push. An unset column on an old row reads as
 	// native, so existing repos are unaffected.
 	Kind string `gorm:"default:native" json:"kind"`
+	// ForkOf is the id of the repo this one was forked from, empty for a repo born
+	// here. It is provenance, not a live link: a fork owns its bytes outright and
+	// nothing here follows the pointer to fetch or sync. Deleting the source leaves
+	// this dangling on purpose — the fork's history is still its own, and cascading a
+	// delete into someone else's repo would be far worse than a stale id.
+	ForkOf string `gorm:"index;default:''" json:"fork_of,omitempty"`
 	// UpstreamURL is the source a mirror fetches from, stored WITHOUT credentials
 	// (userinfo stripped — see sanitizeUpstreamURL). The authenticated URL used to
 	// fetch is supplied per-request by the caller (git-connector) and never persisted;

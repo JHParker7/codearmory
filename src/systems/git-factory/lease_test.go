@@ -223,12 +223,107 @@ func TestMaintenanceLeaseTTL(t *testing.T) {
 		// replica would sweep every tick — the bug this whole file exists to fix.
 		{"0", 5 * time.Minute},
 		{"-1m", 5 * time.Minute},
+		// The floor. The renewal ticker runs at a third of the TTL, and time.NewTicker
+		// panics on a non-positive interval — anything under 3ns divides to zero, which
+		// would take the process down from a goroutine on the first sweep rather than
+		// at startup.
+		{"1ns", 5 * time.Minute},
+		{"999ms", 5 * time.Minute},
+		{"1s", time.Second},
 	}
 	for _, c := range cases {
 		t.Setenv("GIT_MAINTENANCE_LEASE_TTL", c.env)
 		if got := maintenanceLeaseTTL(); got != c.want {
 			t.Errorf("GIT_MAINTENANCE_LEASE_TTL=%q gave %v; want %v", c.env, got, c.want)
 		}
+	}
+}
+
+// The cooldown, and the reason it exists rather than a plain release. Replicas tick on
+// their own offsets, so releasing on completion would only stop sweeps OVERLAPPING —
+// the next pod to tick would find the lease free and walk the whole store again, and N
+// replicas would still cost N sweeps per interval.
+func TestRunLeasedSweep_OnlyOneSweepPerIntervalAcrossReplicas(t *testing.T) {
+	setupTestDB(t)
+	ctx := context.Background()
+	for _, name := range []string{"one", "two"} {
+		seedRepoVisible(t, uuid.New().String(), "user-1", "admin", name, visibilityPrivate)
+	}
+
+	// Pod A's tick.
+	runLeasedSweep(ctx, "pod-a", time.Minute, time.Hour)
+
+	// Pod B ticks later in the SAME interval, which is the ordinary case rather than an
+	// edge — nothing aligns the replicas' tickers.
+	got, err := acquireLease(ctx, maintenanceLeaseName, "pod-b", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire (b): %v", err)
+	}
+	if got {
+		t.Error("pod-b took the sweep lease in the same interval — the store gets walked once per replica, which is what the lease exists to prevent")
+	}
+}
+
+// The cooldown must expire, or the first pod to sweep would own maintenance forever.
+func TestRunLeasedSweep_AnotherReplicaSweepsOnceTheIntervalElapses(t *testing.T) {
+	setupTestDB(t)
+	ctx := context.Background()
+	seedRepoVisible(t, uuid.New().String(), "user-1", "admin", "one", visibilityPrivate)
+
+	// A negative interval puts the cooldown in the past, standing in for the next tick
+	// coming round without having to wait for one.
+	runLeasedSweep(ctx, "pod-a", time.Minute, -time.Second)
+
+	got, err := acquireLease(ctx, maintenanceLeaseName, "pod-b", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire (b): %v", err)
+	}
+	if !got {
+		t.Error("no replica could sweep after the interval elapsed — maintenance would stop entirely")
+	}
+}
+
+// A sweep cut short by shutdown covered only part of the store, so it must NOT suppress
+// the next one for a whole interval.
+func TestRunLeasedSweep_ShutdownReleasesRatherThanCoolingDown(t *testing.T) {
+	setupTestDB(t)
+	seedRepoVisible(t, uuid.New().String(), "user-1", "admin", "one", visibilityPrivate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runLeasedSweep(ctx, "pod-a", time.Minute, time.Hour)
+
+	got, err := acquireLease(context.Background(), maintenanceLeaseName, "pod-b", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire (b): %v", err)
+	}
+	if !got {
+		t.Error("a sweep aborted at shutdown still cooled down for the full interval, so the store went unswept")
+	}
+}
+
+func TestCoolDownLease_DoesNotDisturbANewHolder(t *testing.T) {
+	setupTestDB(t)
+	ctx := context.Background()
+
+	if _, err := acquireLease(ctx, "sweep", "pod-a", -time.Second); err != nil {
+		t.Fatalf("acquire (a): %v", err)
+	}
+	if _, err := acquireLease(ctx, "sweep", "pod-b", time.Minute); err != nil {
+		t.Fatalf("acquire (b): %v", err)
+	}
+
+	// pod-a finishing a sweep it had already lost must not extend anything of pod-b's.
+	if err := coolDownLease(ctx, "sweep", "pod-a", time.Hour); err != nil {
+		t.Fatalf("cool down (a): %v", err)
+	}
+
+	got, err := acquireLease(ctx, "sweep", "pod-c", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire (c): %v", err)
+	}
+	if got {
+		t.Error("pod-a's cooldown overwrote pod-b's lease, letting a third replica in")
 	}
 }
 

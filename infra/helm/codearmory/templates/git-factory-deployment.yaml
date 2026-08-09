@@ -143,8 +143,17 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.gitFactory.env.maintenanceInterval }}
-            # How often the in-process repack loop runs (Go duration, e.g. "6h").
+            # How often the repack sweep runs (Go duration, e.g. "6h"). Every replica
+            # ticks; only the lease holder sweeps, so this is the interval for the
+            # STORE, not per pod.
             - name: GIT_MAINTENANCE_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gitFactory.env.maintenanceLeaseTTL }}
+            # How long the sweep lease is granted for — i.e. how long maintenance
+            # stays blocked after a holder dies without releasing. Not a sweep budget:
+            # the holder renews while it works.
+            - name: GIT_MAINTENANCE_LEASE_TTL
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.gitFactory.env.refLockMaxAge }}

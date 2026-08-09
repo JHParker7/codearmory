@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -98,6 +99,11 @@ func handleReplicate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repo_id and primary_url are required", http.StatusBadRequest)
 		return
 	}
+	// primary_url becomes a `git fetch` argv element — see validateFetchURL (mirror.go).
+	if err := validateFetchURL(req.PrimaryURL); err != nil {
+		http.Error(w, "primary_url is not a valid remote", http.StatusBadRequest)
+		return
+	}
 	if err := fetchFromPrimary(ctx, req.RepoID, req.PrimaryURL); err != nil {
 		slog.ErrorContext(ctx, "replicate: fetch from primary failed", "repo_id", req.RepoID, "error", err)
 		http.Error(w, "fetch from primary failed", http.StatusBadGateway)
@@ -128,8 +134,15 @@ func fetchFromPrimary(ctx context.Context, repoID, primaryURL string) error {
 			return err
 		}
 	}
+	// primaryURL arrives in a request body and lands in git's argv, where a value
+	// starting with a dash is parsed as an OPTION rather than a remote —
+	// "--upload-pack=<cmd>" being one git executes. Screen it, and pass "--" so the
+	// exec is safe even if this check is ever relaxed. See validateFetchURL (mirror.go).
+	if err := validateFetchURL(primaryURL); err != nil {
+		return fmt.Errorf("replicate fetch: %w", err)
+	}
 	args := []string{"-c", "http.extraHeader=" + forwardHeader + ": " + nodeForwardKey(),
-		"-C", dir, "fetch", "--prune", "--force", primaryURL}
+		"-C", dir, "fetch", "--prune", "--force", "--", primaryURL}
 	args = append(args, mirrorRefspecs...)
 	cmd := exec.CommandContext(ctx, gitBinary, args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")

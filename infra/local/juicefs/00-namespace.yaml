@@ -1,6 +1,28 @@
+# The two namespaces this bring-up uses.
+#
+# They are split because their lifecycles are: the storage plane below outlives any
+# number of git_factory installs, which is the same reason the chart takes
+# `persistence.existingClaim` rather than provisioning its own PVC.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: juicefs
+  labels:
+    app.kubernetes.io/part-of: codearmory-git-plane
+---
+# Where git_factory itself runs, along with the ReadWriteMany claim it mounts
+# (30-juicefs-fs.yaml), the migration Job (40) and the Deployment (50).
+#
+# The manifests here name it explicitly, so setup.sh's NS_APP is not a general override —
+# see the note there.
+#
+# PREREQUISITE: 50-git-factory.yaml expects `postgres:5432` and `gatekeeper:8081` to
+# resolve IN THIS NAMESPACE. Nothing in this directory deploys them; bring the rest of
+# the local stack up here first, or point the Deployment's DATABASE_URL/GATEKEEPER_URL at
+# wherever they actually run.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitfactory
   labels:
     app.kubernetes.io/part-of: codearmory-git-plane

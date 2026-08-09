@@ -240,9 +240,25 @@ pointed at a shared mount safely rather than hopefully:
 - **Chart** takes `persistence.existingClaim` (a JuiceFS PVC provisioned outside
   the release, since the CSI driver, metadata engine and object store outlive any
   one release), and `accessMode: ReadWriteMany` unpins `replicaCount` and switches
-  the rollout from `Recreate` to surge-first. Two combinations are refused at
-  render time: replicas > 1 without RWX, and replicas > 1 with the ref-lock
-  janitor disabled.
+  the rollout from `Recreate` to surge-first. Four combinations are refused at
+  render time: replicas > 1 without RWX, replicas > 1 with the ref-lock janitor
+  disabled, and the same two again for `autoscaling.enabled` — an HPA is the same
+  second-writer hazard as a fixed replica count, only it appears later, under load.
+- **Maintenance lease** (`lease.go`) is what makes an elastic replica count
+  affordable rather than merely safe. The repack/janitor sweep used to run in every
+  replica because there only ever *was* one; on a shared filesystem every replica
+  can reach every repo, so an unguarded ticker means N pods walking the whole store
+  N times per interval — worst exactly where shared storage is supposed to pay off.
+  Each tick now takes a cluster-wide lease (one conditional `UPDATE` on
+  `maintenance_leases`) and only the winner sweeps; the holder renews at a third of
+  `GIT_MAINTENANCE_LEASE_TTL` while it works, so the TTL stays short for fast
+  takeover without bounding how long a sweep may run.
+
+  It is deliberately **not** a correctness mechanism, and nothing should be built on
+  it as one: `git gc` takes its own `gc.pid` lock and the ref-lock janitor is
+  age-gated and already tolerates a racing pod. Two overlapping sweeps are safe;
+  they are just wasteful. That is what licenses a wall-clock lease rather than a
+  consensus protocol — clock skew can only shift *when* a sweep happens.
 - **`persistence.fsGroup: false`** exists for this path. The ownership pass is a
   recursive `chown` over the whole store, and on a metadata-engine filesystem every
   operation in it is a transaction — on a large store that turns pod startup into a

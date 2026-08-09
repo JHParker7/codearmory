@@ -55,12 +55,23 @@ const maintenanceLeaseName = "maintenance-sweep"
 // this rather than deleting the row, so release and expiry take the same code path.
 var leaseEpoch = time.Unix(0, 0).UTC()
 
+// minMaintenanceLeaseTTL is the shortest TTL worth honouring. The holder renews at a
+// third of the TTL (runLeasedSweep), so this is also what keeps that interval a
+// positive duration: time.NewTicker panics on a non-positive one, and any TTL under 3ns
+// divides to exactly zero. A sub-second lease is a typo rather than a tuning decision
+// either way — it would renew tens of times a second against the database and hand the
+// lease over on ordinary query latency.
+const minMaintenanceLeaseTTL = time.Second
+
 // maintenanceLeaseTTL is how long a lease is granted for, from
 // GIT_MAINTENANCE_LEASE_TTL. It is NOT how long a sweep may take — the holder renews
 // while it works — it is how long the sweep stays blocked after a holder dies without
 // releasing. Shorter means faster takeover and more renewal traffic; the default of 5
 // minutes is well under the default hourly interval, so a killed pod costs at most one
 // skipped tick.
+//
+// This is the ONLY place a TTL is validated, so it must return something every caller
+// can use unconditionally: at or above minMaintenanceLeaseTTL, always positive.
 func maintenanceLeaseTTL() time.Duration {
 	const def = 5 * time.Minute
 	raw := strings.TrimSpace(envOrDefault("GIT_MAINTENANCE_LEASE_TTL", ""))
@@ -68,8 +79,12 @@ func maintenanceLeaseTTL() time.Duration {
 		return def
 	}
 	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		slog.Warn("maintenance: bad GIT_MAINTENANCE_LEASE_TTL, using the default", "value", raw)
+	if err != nil || d < minMaintenanceLeaseTTL {
+		// Fall back rather than clamp. A value this far out is a mistake, and running
+		// on a silently corrected one hides it — whereas the default is at least a
+		// duration someone chose.
+		slog.Warn("maintenance: bad GIT_MAINTENANCE_LEASE_TTL, using the default",
+			"value", raw, "minimum", minMaintenanceLeaseTTL.String(), "default", def.String())
 		return def
 	}
 	return d
@@ -85,6 +100,12 @@ func acquireLease(ctx context.Context, name, holder string, ttl time.Duration) (
 	// grants it. DoNothing on conflict is what keeps several replicas racing through a
 	// cold start from turning first boot into an error — GORM renders it as ON CONFLICT
 	// DO NOTHING on both Postgres and SQLite.
+	//
+	// This runs on every call, not only the first: after the row exists it is a no-op
+	// insert, one round-trip per replica per tick. Cheap enough at maintenance
+	// intervals (hours) that keeping acquire a single unconditional path is worth more
+	// than saving it — but it is a real query, so do not reuse this helper for anything
+	// that ticks fast.
 	if err := db.Clauses(clause.OnConflict{DoNothing: true}).
 		Create(&MaintenanceLease{Name: name, ExpiresAt: leaseEpoch}).Error; err != nil {
 		return false, fmt.Errorf("ensure lease row: %w", err)
@@ -118,9 +139,44 @@ func renewLease(ctx context.Context, name, holder string, ttl time.Duration) (bo
 	return res.RowsAffected == 1, nil
 }
 
+// coolDownLease holds the lease until the next sweep is due, and is what actually makes
+// the lease save anything.
+//
+// Releasing on completion instead would only prevent CONCURRENT sweeps: replicas tick
+// on their own offsets, so the pod that ticks next in the same interval would find the
+// lease free and walk the whole store again. N replicas would still cost N full sweeps
+// per interval — serialised rather than overlapping, but exactly the cost this file
+// exists to avoid. Keeping the lease until the interval elapses is what turns "one
+// sweeper at a time" into "one sweep per interval".
+//
+// Measured from the END of the sweep, so the gap between sweeps is at least d even when
+// a sweep runs long. That makes the true period interval + sweep duration rather than
+// interval, which is the right way round: drifting slightly slow costs nothing, while
+// dating the cooldown from the start would let a sweep lasting longer than the interval
+// be followed immediately by another.
+//
+// A holder that dies during the cooldown blocks nothing: the row expires exactly when
+// the next sweep was due anyway, so any replica picks it up on schedule.
+func coolDownLease(ctx context.Context, name, holder string, d time.Duration) error {
+	// WithoutCancel for the same reason as releaseLease: this runs on the way out of a
+	// sweep, and failing here on a cancelled context would leave the lease on its short
+	// sweep TTL instead of the cooldown.
+	ctx = context.WithoutCancel(ctx)
+	if err := connect().WithContext(ctx).Model(&MaintenanceLease{}).
+		Where("name = ? AND holder = ?", name, holder).
+		Update("expires_at", time.Now().UTC().Add(d)).Error; err != nil {
+		return fmt.Errorf("cool down lease: %w", err)
+	}
+	return nil
+}
+
 // releaseLease gives the lease up early, so the next tick can go to any replica instead
 // of waiting out the TTL. Scoped to the holder so a pod that already lost the lease
 // cannot expire the new holder's grant on its way out.
+//
+// Used when a sweep ends WITHOUT having covered the store — shutdown, specifically.
+// A completed sweep cools down instead; releasing there is the bug coolDownLease
+// documents.
 func releaseLease(ctx context.Context, name, holder string) error {
 	// WithoutCancel: release runs on the way out of a sweep, including when that sweep
 	// ended because ctx was cancelled at shutdown. Releasing on the cancelled context

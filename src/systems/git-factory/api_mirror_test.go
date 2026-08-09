@@ -173,6 +173,86 @@ func TestEnsureMirror_MirrorIsReadOnly(t *testing.T) {
 	}
 }
 
+// upstream_url lands in the argv of `git fetch`, where git parses options positionally:
+// a value starting with "-" is read as an OPTION, and "--upload-pack=<cmd>" names a
+// program git EXECUTES. An unscreened URL here was arbitrary command execution in the
+// service that holds every repo, so this is a security regression test, not a
+// validation-shape one — it must keep failing loudly if the guard is removed.
+func TestEnsureMirror_RejectsOptionLikeUpstreamURL(t *testing.T) {
+	setupTestDB(t)
+	initMetrics()
+	t.Setenv("GIT_FACTORY_INTERNAL_KEY", testInternalKey)
+
+	marker := filepath.Join(t.TempDir(), "pwned")
+	for _, bad := range []string{
+		"--upload-pack=touch " + marker, // the executing option
+		"-u",                            // any leading dash at all
+		"ext::sh -c touch " + marker,    // git's command-running transport helper
+	} {
+		rec := postMirror(t, map[string]any{
+			"upstream_url": bad, "namespace": "acme", "name": "widgets", "owner": "ci-user",
+		}, testInternalKey)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("upstream_url %q: status = %d, want 400", bad, rec.Code)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("REGRESSION: the injected command executed — git ran the upstream_url as an option")
+	}
+}
+
+// The same argv injection on the replication path, which takes primary_url from a
+// request body and hands it to the same `git fetch`.
+func TestReplicate_RejectsOptionLikePrimaryURL(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("GIT_NODE_FORWARD_KEY", "node-key")
+
+	marker := filepath.Join(t.TempDir(), "pwned")
+	body, _ := json.Marshal(map[string]any{
+		"repo_id": "11111111-1111-1111-1111-111111111111", "version": 1,
+		"primary_url": "--upload-pack=touch " + marker,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/internal/replicate", bytes.NewReader(body))
+	req.Header.Set("X-Git-Node-Forward", "node-key")
+	rec := httptest.NewRecorder()
+	handleReplicate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("REGRESSION: the injected command executed on the replicate path")
+	}
+}
+
+func TestValidateFetchURL(t *testing.T) {
+	ok := []string{
+		"https://git.example.com/a/b.git",
+		"http://user:tok@host:3000/o/r.git",
+		"/tmp/some/local/repo",   // a filesystem path is a valid git remote
+		"file:///tmp/local/repo", // as is file://
+		"C:\\repos\\thing",       // not mistaken for a transport helper
+	}
+	for _, in := range ok {
+		if err := validateFetchURL(in); err != nil {
+			t.Errorf("validateFetchURL(%q) = %v, want nil", in, err)
+		}
+	}
+	bad := []string{
+		"",
+		"   ",
+		"-u",
+		"--upload-pack=touch /tmp/x",
+		"--exec=whoami",
+		"ext::sh -c whoami",
+	}
+	for _, in := range bad {
+		if err := validateFetchURL(in); err == nil {
+			t.Errorf("validateFetchURL(%q) = nil, want rejection", in)
+		}
+	}
+}
+
 func TestSanitizeUpstreamURL(t *testing.T) {
 	cases := map[string]string{
 		"https://user:tok@git.example.com/a/b.git": "https://git.example.com/a/b.git",
