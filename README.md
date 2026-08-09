@@ -213,25 +213,25 @@ Everything above is **core** — it lives in this repo and none of it is enabled
 
 ## Docker images
 
-Pre-built images are published to GHCR on every release (`alpha-latest` for pre-release):
+Pre-built images are published to Docker Hub on every release (`alpha-latest` for pre-release):
 
 ```
-ghcr.io/code-armory-app/conductor:alpha-latest
-ghcr.io/code-armory-app/gatekeeper:alpha-latest
-ghcr.io/code-armory-app/registry:alpha-latest
-ghcr.io/code-armory-app/forge:alpha-latest
-ghcr.io/code-armory-app/egress-proxy:alpha-latest
-ghcr.io/code-armory-app/workflows:alpha-latest
-ghcr.io/code-armory-app/tickets:alpha-latest
-ghcr.io/code-armory-app/containers:alpha-latest
-ghcr.io/code-armory-app/events:alpha-latest
-ghcr.io/code-armory-app/builder:alpha-latest
-ghcr.io/code-armory-app/git:alpha-latest
-ghcr.io/code-armory-app/artifacts:alpha-latest
-ghcr.io/code-armory-app/git-factory:alpha-latest
-ghcr.io/code-armory-app/outpost-gateway:alpha-latest
-ghcr.io/code-armory-app/outpost:alpha-latest
-ghcr.io/code-armory-app/portal:alpha-latest
+docker.io/jhp73/conductor:alpha-latest
+docker.io/jhp73/gatekeeper:alpha-latest
+docker.io/jhp73/registry:alpha-latest
+docker.io/jhp73/forge:alpha-latest
+docker.io/jhp73/egress-proxy:alpha-latest
+docker.io/jhp73/workflows:alpha-latest
+docker.io/jhp73/tickets:alpha-latest
+docker.io/jhp73/containers:alpha-latest
+docker.io/jhp73/events:alpha-latest
+docker.io/jhp73/builder:alpha-latest
+docker.io/jhp73/git:alpha-latest
+docker.io/jhp73/artifacts:alpha-latest
+docker.io/jhp73/git-factory:alpha-latest
+docker.io/jhp73/outpost-gateway:alpha-latest
+docker.io/jhp73/outpost:alpha-latest
+docker.io/jhp73/portal:alpha-latest
 ```
 
 ---

@@ -179,8 +179,8 @@ services:
       # The forge/git-clone step runs on a forge-controlled minimal git image (users
       # never pick one; it bypasses ALLOWED_IMAGES). To exercise git-clone locally
       # before CI publishes the image, build it from the repo root first:
-      #   docker build -t ghcr.io/code-armory-app/runner-git:latest infra/runner-images/git
-      FORGE_GIT_IMAGE: ghcr.io/code-armory-app/runner-git:latest
+      #   docker build -t docker.io/jhp73/runner-git:latest infra/runner-images/git
+      FORGE_GIT_IMAGE: docker.io/jhp73/runner-git:latest
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # Job secret_refs: forge resolves "secret:<name>" via gatekeeper (forge must
@@ -374,7 +374,7 @@ services:
     restart: on-failure
 
   gitea-integration:
-    image: ghcr.io/code-armory-app/gitea_integration:${CODEARMORY_TAG:-alpha}
+    image: docker.io/jhp73/gitea_integration:${CODEARMORY_TAG:-alpha}
     environment:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration

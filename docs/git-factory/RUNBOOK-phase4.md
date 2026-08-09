@@ -61,7 +61,7 @@ Both unset → `prefer_mirror` degrades to today's behaviour (upstream URL retur
 
 ## Rollout order
 
-1. **Publish images.** git-factory image to `ghcr.io/code-armory-app/git-factory` (its
+1. **Publish images.** git-factory image to `docker.io/jhp73/git-factory` (its
    pipeline/operator — this session has no push access); git-connector via the monorepo
    CI/builder. Until git-factory's image carries Phases 1–3, none of the endpoints exist.
 2. **Set secrets** (above) on both deployments. Generate three independent random keys.
@@ -99,21 +99,21 @@ through git-connector's internal clone-token, and `prefer_mirror` rewrites the U
 YAML change is required — the URL git-connector returns changes, not the pipeline. If you
 prefer an explicit switch, point `GIT_CLONE_URL` at the git-factory repo path directly.
 
-## Local image build (minikube, no ghcr push access)
+## Local image build (minikube, no registry push access)
 
-Step 1's "publish images" does not have to go through ghcr. To run this code on a local
+Step 1's "publish images" does not have to go through a registry. To run this code on a local
 minikube, build and side-load it:
 
 ```bash
 # git-factory
 cd src/control_plane
-docker build -t ghcr.io/code-armory-app/git-factory:phase4-local .
-minikube image load ghcr.io/code-armory-app/git-factory:phase4-local
+docker build -t docker.io/jhp73/git-factory:phase4-local .
+minikube image load docker.io/jhp73/git-factory:phase4-local
 
 # git-connector (monorepo)
 cd src/systems/git
-docker build -t ghcr.io/code-armory-app/git:phase4-local .
-minikube image load ghcr.io/code-armory-app/git:phase4-local
+docker build -t docker.io/jhp73/git:phase4-local .
+minikube image load docker.io/jhp73/git:phase4-local
 ```
 
 minikube here runs **containerd**, not docker — `minikube image load` is required;
@@ -125,7 +125,7 @@ Roll git-factory onto it:
 
 ```bash
 kubectl -n codearmory set image deployment/ca-codearmory-git-factory \
-  git-factory=ghcr.io/code-armory-app/git-factory:phase4-local
+  git-factory=docker.io/jhp73/git-factory:phase4-local
 ```
 
 ## Field notes from the first local rollout

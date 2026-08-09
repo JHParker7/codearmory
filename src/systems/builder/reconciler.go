@@ -74,7 +74,7 @@ func startReconciler(ctx context.Context) {
 	}
 	namespace := envOrDefault("BUILDER_TARGET_NAMESPACE", os.Getenv("POD_NAMESPACE"))
 	prefix := envOrDefault("BUILDER_RELEASE_PREFIX", "codearmory")
-	imgRegistry := envOrDefault("BUILDER_IMAGE_REGISTRY", "ghcr.io/code-armory-app")
+	imgRegistry := envOrDefault("BUILDER_IMAGE_REGISTRY", "docker.io/jhp73")
 	imgTag := envOrDefault("BUILDER_IMAGE_TAG", "latest")
 	// Say so when the built-in registry default is in use. Every service this
 	// reconciler deploys without its own registry gets images composed against this
@@ -83,7 +83,7 @@ func startReconciler(ctx context.Context) {
 	// RUNNING workload, that takes a healthy service down rather than merely failing to
 	// start a new one. That is not hypothetical: it is how git_factory (back when it
 	// was still builder-deployed, before it moved in-repo as a core service) ended up
-	// in ErrImagePull against ghcr.io/code-armory-app/git-factory:dev.
+	// in ErrImagePull against <registry>/git-factory:dev.
 	//
 	// The failure surfaces far from its cause — a pod dying minutes or hours later, on
 	// an unattended 30s loop — so the fallback is worth one line at startup where it is

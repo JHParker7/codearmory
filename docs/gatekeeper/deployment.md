@@ -21,10 +21,10 @@ Services:
 | postgres | 5432 | Primary datastore |
 | redis | 6379 | Permission-check and user cache |
 
-Images are built from source on each `docker compose up --build`. Pre-built images are available on GHCR:
+Images are built from source on each `docker compose up --build`. Pre-built images are available on Docker Hub:
 
 ```bash
-docker pull ghcr.io/code-armory-app/gatekeeper:alpha-latest
+docker pull docker.io/jhp73/gatekeeper:alpha-latest
 ```
 
 ## Kubernetes (Helm)
