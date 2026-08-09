@@ -10,6 +10,11 @@ COPY portal/package*.json ./
 RUN npm ci
 COPY portal/src ./src
 COPY portal/index.html portal/tsconfig.json portal/vite.config.ts ./
+# The sub-path the SPA will be served from, baked into every asset URL by Vite. It must
+# match portal-bff's PORTAL_BASE_PATH at runtime — see vite.config.ts. Empty (default)
+# builds a root-mounted SPA, so this changes nothing unless a deployment asks for it.
+ARG PORTAL_BASE_PATH=""
+ENV PORTAL_BASE_PATH=$PORTAL_BASE_PATH
 RUN npm run build
 
 # 2. Build the Go BFF binary (standalone module, GOWORK=off — no workspace needed).
