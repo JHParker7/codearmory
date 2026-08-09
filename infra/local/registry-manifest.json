@@ -2099,9 +2099,129 @@
         "path": "/repos/{id}/protections/{pattern}",
         "action": "setProtection",
         "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/pulls/{number}/reviews",
+        "action": "getPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/reviews",
+        "action": "reviewPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/pulls/{number}/comments",
+        "action": "getPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/comments",
+        "action": "commentPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}/pulls/{number}/comments/{comment_id}",
+        "action": "commentPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/statuses/{sha}",
+        "action": "setStatus",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/commits/{sha}/statuses",
+        "action": "listStatus",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/webhooks",
+        "action": "listWebhook",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/webhooks",
+        "action": "setWebhook",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}/webhooks/{hook_id}",
+        "action": "setWebhook",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/fork",
+        "action": "forkRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/forks",
+        "action": "getRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/transfer",
+        "action": "deleteRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/tags",
+        "action": "createTag",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/tags/{name}",
+        "action": "listTag",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}/tags/{name}",
+        "action": "deleteTag",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/codeowners",
+        "action": "getBlob",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/search",
+        "action": "getBlob",
+        "resource": "codearmory_git_factory/repos"
       }
     ],
-    "actions": [],
+    "actions": [
+      {
+        "name": "git_factory/set-status",
+        "summary": "Report a commit check result back to git_factory",
+        "description": "Records a check result against a commit in a git_factory repo, which is what a branch protection rule's `require_checks` reads. Pass `id` (the repo id), `sha` (the commit, normally the one the run checked out), `context` (the check's name, e.g. \"build\"), `state` (pending|success|failure|error) and optionally `description` and `target_url`. Posting the same context again supersedes the previous result, so a re-run reports the new verdict rather than accumulating history. Until every required context is `success`, a merge through the API is refused \u2014 a commit with no status reported is treated as pending, never as passing.",
+        "method": "POST",
+        "path": "/repos/{id}/statuses/{sha}",
+        "required_permission": {
+          "action": "setStatus",
+          "resource": "codearmory_git_factory/repos"
+        }
+      }
+    ],
     "default_grants": [
       {
         "grant_on": "user",
@@ -2128,7 +2248,16 @@
           "mergePull",
           "updatePull",
           "listProtection",
-          "setProtection"
+          "setProtection",
+          "reviewPull",
+          "commentPull",
+          "setStatus",
+          "listStatus",
+          "listWebhook",
+          "setWebhook",
+          "forkRepo",
+          "createTag",
+          "deleteTag"
         ],
         "resources": [
           "{username}/codearmory_git_factory/repos",

@@ -28,6 +28,16 @@ import (
 const (
 	gitEventSource = "codearmory_git_factory"
 	eventPush      = "repo.push"
+
+	// Pull request lifecycle. Previously a merge was reported only as a push, which
+	// flattened the distinction a consumer most needs: "someone opened a PR" and
+	// "something landed on main" want different reactions, and a push event cannot
+	// express the first at all. A merge still emits its push as well — the ref really
+	// did move, and a build watching the branch must not have to know about PRs.
+	eventPullOpened   = "repo.pull_request.opened"
+	eventPullMerged   = "repo.pull_request.merged"
+	eventPullClosed   = "repo.pull_request.closed"
+	eventPullReviewed = "repo.pull_request.reviewed"
 )
 
 var (
@@ -91,10 +101,26 @@ func pushFields(re Repo, pusher, head string, refs []string, before map[string]s
 // refs are the branches the push updated; before maps ref name to the SHA it pointed at BEFORE
 // the push (nil when the caller has no such snapshot).
 func notifyPush(ctx context.Context, re Repo, pusher string, refs []string, before map[string]string) {
-	if !eventsEnabled() {
+	// Nothing to emit to and nowhere to look for webhooks: stay completely inert, and in
+	// particular touch no database. pushFields reaches headBranch, and the read handle
+	// exits the process when there is nothing to connect to.
+	if !eventsEnabled() && !dbReady() {
 		return
 	}
 	_, fields := pushFields(re, pusher, headBranch(ctx, re.ID), refs, before)
+	// Detached from the request so the fan-out outlives the response, but carrying the
+	// trace so both deliveries correlate with the push that caused them.
+	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+
+	// Repo webhooks are a SEPARATE fan-out, not a consumer of the internal event plane.
+	// Dispatched BEFORE the events-service guard below, so a deployment with no events
+	// service still delivers a repo's own hooks — that is the whole point of offering
+	// them.
+	go deliverWebhooks(emitCtx, re.ID, eventPush, fields)
+
+	if !eventsEnabled() {
+		return
+	}
 
 	// The tenant is the repo's OWNER, not the pusher. Triggers are matched per tenant, and the
 	// thing that should react to a push is the CI the repo owner configured — a collaborator
@@ -110,9 +136,57 @@ func notifyPush(ctx context.Context, re Repo, pusher string, refs []string, befo
 		Data:    fields,
 	}
 
-	// Detached from the request so the emit outlives the response, but carrying the trace so
-	// the event correlates with the push that caused it.
+	go emitEvent(emitCtx, ev, re.ID)
+}
+
+// pullFields is the payload every pull_request event carries. Split out for the same
+// reason pushFields is: it is a pure function of its arguments and can be tested without
+// a database.
+func pullFields(re Repo, pr PullRequest, actor string) map[string]any {
+	return map[string]any{
+		"repo_id":   re.ID,
+		"repo":      re.Namespace + "/" + re.Name,
+		"namespace": re.Namespace,
+		"name":      re.Name,
+		"clone_url": re.HttpUrl,
+		"number":    strconv.Itoa(pr.Number),
+		"title":     pr.Title,
+		"state":     pr.State,
+		// Both refs, because a filter wants to key on the TARGET ("only PRs into main")
+		// while a build wants the SOURCE (the thing to check out).
+		"source_ref":   pr.SourceRef,
+		"target_ref":   pr.TargetRef,
+		"author":       pr.Author,
+		"actor":        actor,
+		"merge_commit": pr.MergeCommit,
+	}
+}
+
+// notifyPullEvent emits a pull-request lifecycle event. Same three properties as
+// notifyPush: after the fact, detached from the request, and a delivery failure is
+// logged rather than failing the operation that already succeeded.
+func notifyPullEvent(ctx context.Context, re Repo, evType string, pr PullRequest, actor string) {
+	if !eventsEnabled() && !dbReady() {
+		return
+	}
+	fields := pullFields(re, pr, actor)
 	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	// Fired regardless of whether the events service is configured — see notifyPush.
+	go deliverWebhooks(emitCtx, re.ID, evType, fields)
+
+	if !eventsEnabled() {
+		return
+	}
+	ev := sdkevents.Event{
+		Type:    evType,
+		Source:  gitEventSource,
+		Subject: re.Namespace + "/" + re.Name,
+		// Tenant is the repo OWNER, for the reason spelled out in notifyPush: the
+		// triggers that should react are the ones the repo's owner configured, not
+		// whoever happened to click merge.
+		Actor: sdkevents.Actor{UserID: re.Owner},
+		Data:  fields,
+	}
 	go emitEvent(emitCtx, ev, re.ID)
 }
 

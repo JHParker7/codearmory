@@ -178,7 +178,9 @@ func main() {
 	// only copy of pushed source (ARCHITECTURE §5).
 	verifyStorage()
 
-	if err := connect().AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &RepoShare{}, &PullRequest{}, &BranchProtection{}, &MaintenanceLease{}); err != nil {
+	if err := connect().AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &RepoShare{},
+		&PullRequest{}, &PullReview{}, &PullComment{}, &CommitStatus{}, &RepoWebhook{},
+		&BranchProtection{}, &MaintenanceLease{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
@@ -241,6 +243,33 @@ func main() {
 	mux.HandleFunc("GET /repos/{id}/pulls/{number}", handleGetPull)
 	mux.HandleFunc("POST /repos/{id}/pulls/{number}/merge", handleMergePull)
 	mux.HandleFunc("POST /repos/{id}/pulls/{number}/close", handleClosePull)
+	// Review layer — the verdicts branch protection counts, and the discussion it does
+	// not. Separate actions so "may review" is grantable without "may merge".
+	mux.HandleFunc("GET /repos/{id}/pulls/{number}/reviews", handleListReviews)
+	mux.HandleFunc("POST /repos/{id}/pulls/{number}/reviews", handleCreateReview)
+	mux.HandleFunc("GET /repos/{id}/pulls/{number}/comments", handleListComments)
+	mux.HandleFunc("POST /repos/{id}/pulls/{number}/comments", handleCreateComment)
+	mux.HandleFunc("DELETE /repos/{id}/pulls/{number}/comments/{comment_id}", handleDeleteComment)
+	// Commit statuses (checks) — where CI reports back, and what a required check reads.
+	mux.HandleFunc("POST /repos/{id}/statuses/{sha}", handleSetStatus)
+	mux.HandleFunc("GET /repos/{id}/commits/{sha}/statuses", handleListStatuses)
+	// Per-repo outbound webhooks.
+	mux.HandleFunc("GET /repos/{id}/webhooks", handleListWebhooks)
+	mux.HandleFunc("POST /repos/{id}/webhooks", handleCreateWebhook)
+	mux.HandleFunc("DELETE /repos/{id}/webhooks/{hook_id}", handleDeleteWebhook)
+	// Forks — what makes a contribution possible without write access to the target.
+	mux.HandleFunc("POST /repos/{id}/fork", handleForkRepo)
+	mux.HandleFunc("GET /repos/{id}/forks", handleListForks)
+	// Transfer — change of owner/namespace with the id (and so every grant, PR and
+	// byte on disk) left alone.
+	mux.HandleFunc("POST /repos/{id}/transfer", handleTransferRepo)
+	// Tags and releases: a tag is creatable now, and an annotated one is a release.
+	mux.HandleFunc("POST /repos/{id}/tags", handleCreateTag)
+	mux.HandleFunc("GET /repos/{id}/tags/{name}", handleGetTag)
+	mux.HandleFunc("DELETE /repos/{id}/tags/{name}", handleDeleteTag)
+	// CODEOWNERS (read from the ref, never stored) and in-repo code search.
+	mux.HandleFunc("GET /repos/{id}/codeowners", handleGetCodeowners)
+	mux.HandleFunc("GET /repos/{id}/search", handleSearchCode)
 	mux.HandleFunc("GET /repos/{id}/collaborators", handleListCollaborators)
 	mux.HandleFunc("PUT /repos/{id}/collaborators", handleAddCollaborator)
 	mux.HandleFunc("DELETE /repos/{id}/collaborators/{user}", handleRemoveCollaborator)
@@ -251,6 +280,13 @@ func main() {
 	mux.HandleFunc("GET /{ns}/{repo}/info/refs", handleInfoRefs)
 	mux.HandleFunc("POST /{ns}/{repo}/"+string(svcUploadPack), handleUploadPack)
 	mux.HandleFunc("POST /{ns}/{repo}/"+string(svcReceivePack), handleReceivePack)
+
+	// Git LFS. Part of the WIRE surface, not the JSON API: an LFS client is a git client
+	// and authenticates the same way, so these are authorised by authorizeGitRepo (read
+	// for download, write for upload) and never routed through conductor's RBAC.
+	mux.HandleFunc("POST /{ns}/{repo}/info/lfs/objects/batch", handleLFSBatch)
+	mux.HandleFunc("PUT /{ns}/{repo}/info/lfs/objects/{oid}", handleLFSUpload)
+	mux.HandleFunc("GET /{ns}/{repo}/info/lfs/objects/{oid}", handleLFSDownload)
 
 	// Internal pull-through-mirror surface (DESIGN-read-replicas.md §7). Called by
 	// git-connector, authenticated by GIT_FACTORY_INTERNAL_KEY — NOT part of the

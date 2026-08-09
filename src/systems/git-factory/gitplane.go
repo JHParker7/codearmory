@@ -336,6 +336,24 @@ func hasCommits(ctx context.Context, dir, ref string) bool {
 	return exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}").Run() == nil
 }
 
+// refSHA resolves a branch (or any rev) to its commit SHA, or "" when it does not
+// resolve. Used where a SHA has to be pinned to a moment — a review verdict records the
+// head it was given against, and a commit status is keyed by SHA — so an empty result
+// must read as "unknown", never as a match.
+func refSHA(ctx context.Context, repoID, ref string) string {
+	dir, err := localDirFor(ctx, repoID)
+	if err != nil || !branchNameRe.MatchString(ref) {
+		return ""
+	}
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	cmd.Stdout = &out
+	if cmd.Run() != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.String())
+}
+
 // countCommits returns how many commits match a query, for the pager.
 func countCommits(ctx context.Context, repoID string, q commitQuery) (int, error) {
 	dir, err := localDirFor(ctx, repoID)

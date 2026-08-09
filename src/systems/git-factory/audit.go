@@ -44,6 +44,7 @@ const (
 	auditActionPush       = "push"
 	auditActionRepoCreate = "repo.create"
 	auditActionRepoDelete = "repo.delete"
+	auditActionRepoUpdate = "repo.update"
 )
 
 // auditEvent records one entry, asynchronously. actorID is the authenticated user, or

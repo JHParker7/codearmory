@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -63,6 +64,40 @@ func sanitizeUpstreamURL(raw string) string {
 	return raw
 }
 
+// errUnsafeFetchURL rejects a value git would not treat as a plain remote.
+var errUnsafeFetchURL = errors.New("url must not be an option or a transport helper")
+
+// validateFetchURL reports whether raw is safe to hand `git fetch` as its remote.
+//
+// This is a security boundary, not a tidiness check. Two shapes are refused:
+//
+//   - A LEADING DASH. git parses its argv POSITIONALLY, so a value starting with "-"
+//     is consumed as an OPTION rather than a remote — and `--upload-pack=<cmd>` names
+//     the program git runs for the fetch, which git then EXECUTES. An unvalidated
+//     "URL" in the remote position is therefore arbitrary command execution in this
+//     process, not merely a bad fetch.
+//
+//   - TRANSPORT-HELPER syntax ("<helper>::<arg>"). git's "ext::" helper runs its
+//     argument as a command by design. Modern git refuses it by default
+//     (protocol.ext.allow), so this is belt-and-braces — it removes the dependency on
+//     that default holding, and on no operator having relaxed it.
+//
+// Local paths and file:// remain permitted: a filesystem path is a valid git remote
+// and is what the mirror tests fetch from. The exec sites also pass "--", so option
+// parsing is closed structurally even if this check is ever loosened.
+func validateFetchURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "-") {
+		return errUnsafeFetchURL
+	}
+	// "helper::arg" — only when the helper part is a bare token, so a Windows-style
+	// path or a URL carrying "::" in its path is not caught by accident.
+	if helper, _, ok := strings.Cut(raw, "::"); ok && helper != "" && !strings.ContainsAny(helper, "/\\:.") {
+		return errUnsafeFetchURL
+	}
+	return nil
+}
+
 // mirrorRefspecs mirror every branch and tag, forced (upstream is authoritative, so a
 // non-fast-forward or a rewritten history must overwrite the local copy) and pruned (a
 // branch deleted upstream disappears here too).
@@ -96,7 +131,16 @@ func mirrorFetch(ctx context.Context, re Repo, authURL string) error {
 		}
 	}
 
-	args := append([]string{"-C", dir, "fetch", "--prune", "--force", authURL}, mirrorRefspecs...)
+	// Checked here as well as at the API boundary: this function puts a caller-supplied
+	// string into git's argv, so it must not depend on a handler having screened it.
+	if err := validateFetchURL(authURL); err != nil {
+		return fmt.Errorf("mirror fetch: %w", err)
+	}
+
+	// "--" ends git's option parsing, so authURL is read as the remote even if it begins
+	// with a dash. Without it, "--upload-pack=<cmd>" in this position is parsed as an
+	// option and the command is executed — see validateFetchURL.
+	args := append([]string{"-C", dir, "fetch", "--prune", "--force", "--", authURL}, mirrorRefspecs...)
 	cmd := exec.CommandContext(ctx, gitBinary, args...)
 	// Never prompt for credentials: if authURL is missing/invalid, fail fast rather
 	// than hang a request waiting on a terminal that isn't there.
