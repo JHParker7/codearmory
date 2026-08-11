@@ -1592,6 +1592,30 @@
         "path": "/boards/{id}",
         "action": "deleteBoard",
         "resource": "tickets/boards/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/tickets/{id}/dependencies",
+        "action": "updateTicket",
+        "resource": "tickets/tickets/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tickets/{id}/dependencies/{depends_on_id}",
+        "action": "updateTicket",
+        "resource": "tickets/tickets/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/tickets/{ns}/{id}/dependencies",
+        "action": "updateTicket",
+        "resource": "{ns}/tickets/tickets/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tickets/{ns}/{id}/dependencies/{depends_on_id}",
+        "action": "updateTicket",
+        "resource": "{ns}/tickets/tickets/{id}"
       }
     ],
     "actions": [

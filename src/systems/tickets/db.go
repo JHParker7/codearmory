@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -986,6 +987,148 @@ func seedDefaultFieldDefs(ctx context.Context) error {
 		if err := connect().WithContext(ctx).Create(&e.defaults).Error; err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ── TicketDependency ──────────────────────────────────────────────────────────
+
+func (d TicketDependency) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket_dependency.add")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("ticket.id", d.TicketID),
+		attribute.String("depends_on.id", d.DependsOnID),
+	)
+	// Declaring the same dependency twice is a no-op rather than an error: the
+	// caller's intent ("this must wait for that") is already true, and making it
+	// a conflict would force every client to read before writing.
+	if err := connect().WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&d).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (d TicketDependency) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket_dependency.remove")
+	defer span.End()
+	// A hard delete, not the soft `active` flag the other entities use: a
+	// dependency that no longer applies is not history worth keeping, and a
+	// soft-deleted row would still have to be excluded from every readiness
+	// check — one more place to get it wrong.
+	if err := connect().WithContext(ctx).
+		Where("ticket_id=? AND depends_on_id=?", d.TicketID, d.DependsOnID).
+		Delete(&TicketDependency{}).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// removeDependenciesOf clears every dependency edge touching a ticket, in either
+// direction. Called when a ticket is deleted, so nothing is left blocked forever
+// by something that no longer exists.
+func removeDependenciesOf(ctx context.Context, ticketID string) error {
+	return connect().WithContext(ctx).
+		Where("ticket_id=? OR depends_on_id=?", ticketID, ticketID).
+		Delete(&TicketDependency{}).Error
+}
+
+// dependencyIDs returns the ids a ticket depends on, oldest edge first.
+func dependencyIDs(ctx context.Context, ticketID string) ([]string, error) {
+	var rows []TicketDependency
+	if err := connectRead().WithContext(ctx).
+		Where("ticket_id=?", ticketID).
+		Order("created_at").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.DependsOnID)
+	}
+	return out, nil
+}
+
+// loadDependencies fills DependsOn for a batch of tickets.
+//
+// UNLIKE COMMENTS, this runs for listings too. Comments are blanked there
+// (db.go, listTickets) because a hundred tickets' comment histories are large
+// and rarely all wanted. Dependencies are the opposite on both counts: a handful
+// of ids and statuses per ticket, and the whole reason to ask for a listing is
+// often to decide which of those tickets can be worked NOW. Omitting them would
+// force a consumer to fetch every ticket individually to answer that — the N+1
+// this shape exists to avoid, and a trap that has already cost one agent runtime
+// a day of debugging when it judged eligibility from a listing whose comments
+// were empty.
+//
+// Two queries regardless of batch size: one for the edges, one for the blockers.
+func loadDependencies(ctx context.Context, tickets []Ticket, userID, orgID string) error {
+	if len(tickets) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(tickets))
+	for _, t := range tickets {
+		ids = append(ids, t.TicketID)
+	}
+
+	var edges []TicketDependency
+	if err := connectRead().WithContext(ctx).
+		Where("ticket_id IN ?", ids).
+		Order("created_at").
+		Find(&edges).Error; err != nil {
+		return err
+	}
+	for i := range tickets {
+		tickets[i].DependsOn = []TicketDependencyView{}
+	}
+	if len(edges) == 0 {
+		return nil
+	}
+
+	blockerIDs := make([]string, 0, len(edges))
+	seen := map[string]bool{}
+	for _, e := range edges {
+		if !seen[e.DependsOnID] {
+			seen[e.DependsOnID] = true
+			blockerIDs = append(blockerIDs, e.DependsOnID)
+		}
+	}
+	var blockers []Ticket
+	if err := connectRead().WithContext(ctx).
+		Where("ticket_id IN ? AND active = ?", blockerIDs, true).
+		Find(&blockers).Error; err != nil {
+		return err
+	}
+	byID := make(map[string]Ticket, len(blockers))
+	for _, b := range blockers {
+		byID[b.TicketID] = b
+	}
+
+	index := make(map[string]int, len(tickets))
+	for i, t := range tickets {
+		index[t.TicketID] = i
+	}
+	for _, e := range edges {
+		i, ok := index[e.TicketID]
+		if !ok {
+			continue
+		}
+		view := TicketDependencyView{TicketID: e.DependsOnID}
+		// A blocker the caller cannot see is reported as a bare id: they still
+		// need to know the work is blocked, and must not learn what by.
+		if b, ok := byID[e.DependsOnID]; ok && canAccessTicket(b, userID, orgID) {
+			view.Title = b.Title
+			view.Status = b.Status
+		}
+		tickets[i].DependsOn = append(tickets[i].DependsOn, view)
 	}
 	return nil
 }

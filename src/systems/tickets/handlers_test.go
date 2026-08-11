@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err == nil {
-		if migrateErr := conn.AutoMigrate(&Ticket{}, &TicketComment{}, &Board{}, &TicketFieldDef{}); migrateErr == nil {
+		if migrateErr := conn.AutoMigrate(&Ticket{}, &TicketComment{}, &Board{}, &TicketFieldDef{}, &TicketDependency{}); migrateErr == nil {
 			dbInitMu.Lock()
 			gormDB = conn
 			gormDBRead = conn

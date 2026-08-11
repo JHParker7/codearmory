@@ -150,7 +150,7 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}, &TicketFieldDef{}, &Board{}); err != nil {
+	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}, &TicketFieldDef{}, &Board{}, &TicketDependency{}); err != nil {
 		slog.Error("failed to migrate tables", "error", err)
 		os.Exit(1)
 	}
@@ -242,6 +242,11 @@ func main() {
 	mux.HandleFunc("GET /tickets/{ns}/{id}", handleGetTicket)
 	mux.HandleFunc("PUT /tickets/{ns}/{id}", handleUpdateTicket)
 	mux.HandleFunc("DELETE /tickets/{ns}/{id}", handleDeleteTicket)
+
+	mux.HandleFunc("POST /tickets/{id}/dependencies", handleAddDependency)
+	mux.HandleFunc("DELETE /tickets/{id}/dependencies/{depends_on_id}", handleRemoveDependency)
+	mux.HandleFunc("POST /tickets/{ns}/{id}/dependencies", handleAddDependency)
+	mux.HandleFunc("DELETE /tickets/{ns}/{id}/dependencies/{depends_on_id}", handleRemoveDependency)
 
 	mux.HandleFunc("POST /tickets/{id}/comments", handleAddComment)
 	mux.HandleFunc("DELETE /tickets/{id}/comments/{comment_id}", handleDeleteComment)

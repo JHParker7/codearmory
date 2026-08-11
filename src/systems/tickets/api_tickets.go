@@ -335,6 +335,17 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dependencies are loaded for listings, though comments are not: deciding
+	// which of these tickets can be worked now is a main reason to ask for a
+	// listing, and answering it per-ticket would be an N+1.
+	if err := loadDependencies(ctx, tickets, userID, orgID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db query failed")
+		slog.ErrorContext(ctx, "list tickets: dependencies error", "user_id", userID, "error", err)
+		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
+		return
+	}
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tickets) //nolint:errcheck
@@ -388,6 +399,16 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.Comments = comments
+
+	one := []Ticket{t}
+	if err := loadDependencies(ctx, one, userID, orgID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		slog.ErrorContext(ctx, "get ticket: dependencies error", "ticket_id", id, "user_id", userID, "error", err)
+		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
+		return
+	}
+	t = one[0]
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
@@ -676,6 +697,17 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "delete ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete ticket", http.StatusInternalServerError)
 		return
+	}
+
+	// Drop every dependency edge touching this ticket, in BOTH directions.
+	// Otherwise deleting a blocker leaves the tickets waiting on it blocked by
+	// something that no longer exists — permanently unworkable, with nothing left
+	// to explain why. Best-effort: the ticket is already gone, and failing the
+	// request here would report a delete that in fact happened.
+	if err := removeDependenciesOf(ctx, id); err != nil {
+		span.RecordError(err)
+		slog.ErrorContext(ctx, "delete ticket: dependency cleanup failed; tickets may be left blocked by a deleted ticket",
+			"ticket_id", id, "user_id", userID, "error", err)
 	}
 
 	notifyEvents(ctx, eventTicketDeleted, t, nil)
