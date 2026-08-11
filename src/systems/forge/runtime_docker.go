@@ -91,7 +91,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 	// the read-only flag applies only to the image layers, not to explicit mounts.
 	var volMounts []mount.Mount
 	workingDir := ""
-	for _, rm := range resolveVolumeMounts(exec) {
+	for _, rm := range resolveVolumeMounts(exec.Volumes) {
 		volMounts = append(volMounts, mount.Mount{
 			Type:     mount.TypeVolume,
 			Source:   rm.resourceName,

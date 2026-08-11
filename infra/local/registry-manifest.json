@@ -760,6 +760,30 @@
       },
       {
         "method": "POST",
+        "path": "/leases",
+        "action": "createLease",
+        "resource": "forge/leases"
+      },
+      {
+        "method": "GET",
+        "path": "/leases",
+        "action": "listLease",
+        "resource": "forge/leases"
+      },
+      {
+        "method": "GET",
+        "path": "/leases/{id}",
+        "action": "getLease",
+        "resource": "forge/leases"
+      },
+      {
+        "method": "DELETE",
+        "path": "/leases/{id}",
+        "action": "deleteLease",
+        "resource": "forge/leases"
+      },
+      {
+        "method": "POST",
         "path": "/volumes",
         "action": "createVolume",
         "resource": "forge/volumes"
@@ -1070,6 +1094,19 @@
         "resources": [
           "{username}/forge/volumes",
           "{username}/forge/volumes/*"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createLease",
+          "listLease",
+          "getLease",
+          "deleteLease"
+        ],
+        "resources": [
+          "{username}/forge/leases",
+          "{username}/forge/leases/*"
         ]
       },
       {

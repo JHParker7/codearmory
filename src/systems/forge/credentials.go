@@ -114,11 +114,25 @@ func validateSecretRefs(refs, env map[string]string, orgID, userID string) error
 // never persisted or logged. Any error fails the whole execution so a job never
 // runs with a half-resolved or missing credential.
 func resolveCredentials(ctx context.Context, exec Execution) (map[string]string, error) {
-	if len(exec.SecretRefs) == 0 {
+	return resolveCredentialRefs(ctx, exec.SecretRefs, exec.OrgID, exec.UserID)
+}
+
+// resolveLeaseCredentials resolves a lease's references. A lease's environment is
+// fixed when its sandbox starts, so this runs once at boot rather than per command
+// — see the note on Lease.SecretRefs for why an exec cannot carry its own.
+func resolveLeaseCredentials(ctx context.Context, lease Lease) (map[string]string, error) {
+	return resolveCredentialRefs(ctx, lease.SecretRefs, lease.OrgID, lease.UserID)
+}
+
+// resolveCredentialRefs is the shared body: it needs only the references and the
+// ownership scope they resolve under, which is why it takes those rather than a
+// whole execution.
+func resolveCredentialRefs(ctx context.Context, refs map[string]string, orgID, userID string) (map[string]string, error) {
+	if len(refs) == 0 {
 		return nil, nil
 	}
-	out := make(map[string]string, len(exec.SecretRefs))
-	for target, ref := range exec.SecretRefs {
+	out := make(map[string]string, len(refs))
+	for target, ref := range refs {
 		scheme, arg, err := parseCredentialRef(ref)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", target, err)
@@ -126,13 +140,13 @@ func resolveCredentials(ctx context.Context, exec Execution) (map[string]string,
 		var value string
 		switch scheme {
 		case refSchemeSecret:
-			value, err = lookupScopedSecret(ctx, exec.OrgID, exec.UserID, arg)
+			value, err = lookupScopedSecret(ctx, orgID, userID, arg)
 		case refSchemeGitea:
-			value, err = mintGiteaCloneURL(ctx, exec.UserID, arg)
+			value, err = mintGiteaCloneURL(ctx, userID, arg)
 		case refSchemeGit:
-			value, err = mintGitCloneURL(ctx, exec.UserID, arg)
+			value, err = mintGitCloneURL(ctx, userID, arg)
 		case refSchemeToken:
-			value, err = mintArtifactToken(ctx, exec.UserID, exec.OrgID)
+			value, err = mintArtifactToken(ctx, userID, orgID)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", target, err)

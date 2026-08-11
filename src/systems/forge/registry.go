@@ -56,6 +56,26 @@ func (r *runtimeRegistry) Get(ctx context.Context, name string) (Runtime, error)
 	return rt, nil
 }
 
+// Backends lists the enabled backend names. It reads the database rather than the
+// cache on purpose: the cache holds only backends something has already run on,
+// and a sweep that needs to find sandboxes nobody is tracking has to look at
+// backends nothing has touched this process lifetime — which after a restart is
+// all of them. A query failure yields an empty list, so a caller sweeping for
+// orphans does nothing rather than concluding there are none.
+func (r *runtimeRegistry) Backends(ctx context.Context) []string {
+	rows, err := (RuntimeBackend{}).List(ctx, 0, 0)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if be, ok := row.(RuntimeBackend); ok && be.Enabled {
+			names = append(names, be.Name)
+		}
+	}
+	return names
+}
+
 // Evict drops the cached Runtime for a backend so a subsequent Get rebuilds it
 // from current config. Called by the update/delete handlers so admin edits apply
 // to new jobs without a process restart.

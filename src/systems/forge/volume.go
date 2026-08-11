@@ -192,9 +192,9 @@ type resolvedMount struct {
 // resolveVolumeMounts turns an execution's requested VolumeMounts into concrete
 // mounts for the runtime, applying the default mount path. Both the docker and
 // kubernetes runtimes share it so the two cannot derive resource names differently.
-func resolveVolumeMounts(exec Execution) []resolvedMount {
-	out := make([]resolvedMount, 0, len(exec.Volumes))
-	for _, m := range exec.Volumes {
+func resolveVolumeMounts(mounts []VolumeMount) []resolvedMount {
+	out := make([]resolvedMount, 0, len(mounts))
+	for _, m := range mounts {
 		path := m.MountPath
 		if path == "" {
 			path = defaultVolumeMountPath

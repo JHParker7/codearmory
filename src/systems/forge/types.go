@@ -97,11 +97,18 @@ type Execution struct {
 	// and Command from the spec at submit and captures the matched paths via output_env.
 	// Stored for display only — the worker runs the materialised Command and never reads
 	// this back, so it is deliberately absent from claimPendingExecution's SELECT.
-	Resolve  *ResolveSpec `gorm:"column:resolve;type:jsonb;serializer:json" json:"resolve,omitempty"`
-	Status   string       `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode *int         `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout   *string      `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr   *string      `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	Resolve *ResolveSpec `gorm:"column:resolve;type:jsonb;serializer:json" json:"resolve,omitempty"`
+	// LeaseID, when set, runs this command inside an already-booted sandbox the
+	// caller holds (POST /leases) instead of creating one for it. The saving is the
+	// whole sandbox startup, which for a kernel-isolated backend is most of a short
+	// command's wall time. Image, runner class, backend and volumes are inherited
+	// from the lease at submit, so they describe the sandbox the command actually
+	// ran in rather than one that was never created.
+	LeaseID  string  `gorm:"column:lease_id;not null;default:'';index"                json:"lease_id,omitempty"`
+	Status   string  `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode *int    `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout   *string `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr   *string `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server
@@ -328,6 +335,11 @@ type submitRequest struct {
 	// moving a path between an attached volume and the artifact store. It is how a
 	// build cache or a binary survives a run — see ArtifactSpec.
 	Artifact *ArtifactSpec `json:"artifact"`
+	// LeaseID runs the command inside a sandbox the caller already holds, instead of
+	// creating one for it. `image`, `runner_class` and `volumes` are then inherited
+	// from the lease and must not be set: a request that named its own would be
+	// describing a sandbox that is not the one its command runs in.
+	LeaseID string `json:"lease_id"`
 }
 
 // RunResult holds the output of a completed container run. ExitCode is a pointer

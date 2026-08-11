@@ -379,6 +379,9 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		OutputEnv   []byte `gorm:"column:output_env"`
 		Checkout    []byte `gorm:"column:checkout"`
 		Volumes     []byte `gorm:"column:volumes"`
+		// LeaseID routes the command into a sandbox the caller already holds instead
+		// of a fresh one; the worker needs it here to know which of the two to do.
+		LeaseID string `gorm:"column:lease_id"`
 	}
 	var raw pendingRow
 
@@ -424,7 +427,7 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 			LEFT JOIN runner_classes rc ON rc.name = e.runner_class
 			WHERE e.status = 'running'
 		)
-		SELECT e.execution_id, e.user_id, e.image, e.command, e.env, e.timeout_secs, e.runner_class, e.backend, e.org_id, e.secret_refs, e.output_env, e.checkout, e.volumes
+		SELECT e.execution_id, e.user_id, e.image, e.command, e.env, e.timeout_secs, e.runner_class, e.backend, e.org_id, e.secret_refs, e.output_env, e.checkout, e.volumes, e.lease_id
 		FROM executions e
 		CROSS JOIN running_resources rr
 		LEFT JOIN runner_classes cand ON cand.name = e.runner_class
@@ -463,6 +466,7 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	exec.RunnerClass = raw.RunnerClass
 	exec.Backend = raw.Backend
 	exec.OrgID = raw.OrgID
+	exec.LeaseID = raw.LeaseID
 
 	if len(raw.SecretRefs) > 0 {
 		if err := json.Unmarshal(raw.SecretRefs, &exec.SecretRefs); err != nil {
@@ -991,4 +995,164 @@ func listReapableVolumes(ctx context.Context, cutoff time.Time) ([]Volume, error
 		Where("status = ? AND created_at < ?", volumeStatusActive, cutoff).
 		Find(&volumes).Error
 	return volumes, err
+}
+
+// ── Lease ─────────────────────────────────────────────────────────────────────
+
+func (l Lease) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.lease.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("lease.id", l.LeaseID))
+	if err := connect().WithContext(ctx).Create(&l).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (l Lease) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.lease.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("lease.id", l.LeaseID))
+	if err := connect().WithContext(ctx).Save(&l).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (l Lease) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.lease.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("lease.id", l.LeaseID))
+	result := connect().WithContext(ctx).Where("lease_id = ?", l.LeaseID).Delete(&Lease{})
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (l Lease) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.lease.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("lease.id", l.LeaseID))
+	var out Lease
+	if err := connect().WithContext(ctx).Where("lease_id = ?", l.LeaseID).First(&out).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return out, nil
+}
+
+// List returns leases for the UserID set on the receiver, newest first. An empty
+// UserID lists every lease — admin views only; the handler decides which it is.
+func (l Lease) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.lease.list")
+	defer span.End()
+	q := connect().WithContext(ctx).Model(&Lease{})
+	if l.UserID != "" {
+		q = q.Where("user_id = ?", l.UserID)
+	}
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	var leases []Lease
+	if err := q.Order("created_at DESC").Find(&leases).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	rows := make([]db, len(leases))
+	for i, lease := range leases {
+		rows[i] = lease
+	}
+	return rows, nil
+}
+
+// getLease loads one lease by id.
+func getLease(ctx context.Context, leaseID string) (Lease, error) {
+	var out Lease
+	err := connect().WithContext(ctx).Where("lease_id = ?", leaseID).First(&out).Error
+	return out, err
+}
+
+// activeLeaseCount counts the sandboxes a user currently holds — what the
+// per-user lease quota is checked against.
+func activeLeaseCount(ctx context.Context, userID string) (int64, error) {
+	var n int64
+	err := connect().WithContext(ctx).Model(&Lease{}).
+		Where("user_id = ? AND status IN ?", userID, []string{leaseStarting, leaseReady}).
+		Count(&n).Error
+	return n, err
+}
+
+// listActiveLeases returns every lease still holding a sandbox. The reaper filters
+// these in Go against each lease's own deadlines, so the expiry rules live on the
+// Lease type rather than being restated as SQL that could drift from them. The set
+// is small by construction — the per-user quota bounds it.
+func listActiveLeases(ctx context.Context) ([]Lease, error) {
+	var leases []Lease
+	err := connect().WithContext(ctx).
+		Where("status IN ?", []string{leaseStarting, leaseReady}).
+		Order("created_at").
+		Find(&leases).Error
+	return leases, err
+}
+
+// touchLease records that the lease was just used, resetting its idle timer. A
+// missing lease is not an error: the exec path calls this and a lease reaped
+// between claim and dispatch is handled by the dispatch itself, not here.
+func touchLease(ctx context.Context, leaseID string) error {
+	now := time.Now().UTC()
+	return connect().WithContext(ctx).Model(&Lease{}).
+		Where("lease_id = ?", leaseID).
+		Update("last_used_at", now).Error
+}
+
+// finishLease moves a lease to a terminal status, but only from an active one.
+//
+// The compare-and-set matters: an explicit release, the reaper and a failed start
+// can all decide to end the same lease at once, and without it the last writer
+// would win — overwriting a recorded failure reason with a bland "stopped", or
+// resurrecting timestamps on an already-finished row. Reporting whether the row
+// actually moved lets the caller skip a redundant teardown.
+func finishLease(ctx context.Context, leaseID, status, detail string) (bool, error) {
+	now := time.Now().UTC()
+	res := connect().WithContext(ctx).Model(&Lease{}).
+		Where("lease_id = ? AND status IN ?", leaseID, []string{leaseStarting, leaseReady}).
+		Updates(map[string]any{"status": status, "detail": detail, "ended_at": now})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// markLeaseReady flips a starting lease to ready. Like finishLease it is guarded,
+// so a lease released or reaped while still booting is not dragged back to ready
+// by its own start completing a moment later.
+func markLeaseReady(ctx context.Context, leaseID string) (bool, error) {
+	now := time.Now().UTC()
+	res := connect().WithContext(ctx).Model(&Lease{}).
+		Where("lease_id = ? AND status = ?", leaseID, leaseStarting).
+		Updates(map[string]any{"status": leaseReady, "started_at": now, "last_used_at": now})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
