@@ -144,7 +144,7 @@ func (e Execution) List(ctx context.Context, limit, offset int) ([]db, error) {
 	// rerun action) can resubmit an execution without a second fetch; stdout/stderr
 	// stay out of the list because they can be large.
 	q := connect().WithContext(ctx).
-		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class, project").
+		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class, project, lease_id").
 		Where("user_id = ?", e.UserID).
 		Order("created_at DESC").
 		Limit(limit)
@@ -184,7 +184,7 @@ func listExecutions(ctx context.Context, userID, project string, limit, offset i
 	// rerun action) can resubmit an execution without a second fetch; stdout/stderr
 	// stay out of the list because they can be large.
 	q := connect().WithContext(ctx).
-		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class, project").
+		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class, project, lease_id").
 		Order("created_at DESC").
 		Limit(limit)
 	// Widen to executions in any project the caller can reach; otherwise owner-only.
