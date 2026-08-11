@@ -87,15 +87,88 @@ func (t Ticket) Add(ctx context.Context) error {
 	return nil
 }
 
+// ErrVersionConflict is returned when a conditional update's If-Match version
+// does not match the row. It means another writer got there first, which the
+// handler surfaces as 412 Precondition Failed.
+var ErrVersionConflict = errors.New("ticket version conflict")
+
+// mutableTicketAssignments is the set of columns a PUT may change, with the
+// values to write. Enumerated explicitly rather than handed to Save() so that
+// zero values (clearing a description, unassigning) are written rather than
+// skipped, and so the immutable columns — ticket_id, created_by, org_id,
+// namespace, created_at — cannot be moved by an update path.
+//
+// version is incremented BY THE DATABASE rather than by the caller. If the
+// process computed version+1 from a value it had read, two concurrent
+// unconditional writers would both compute the same number, and a later
+// If-Match holding it would match the wrong write.
+func (t Ticket) mutableTicketAssignments() map[string]any {
+	return map[string]any{
+		"title":              t.Title,
+		"description":        t.Description,
+		"status":             t.Status,
+		"priority":           t.Priority,
+		"timescale":          t.Timescale,
+		"due_date":           t.DueDate,
+		"project":            t.Project,
+		"board_id":           t.BoardID,
+		"parent_id":          t.ParentID,
+		"assignee_id":        t.AssigneeID,
+		"workflow_id":        t.WorkflowID,
+		"run_id":             t.RunID,
+		"forge_execution_id": t.ForgeExecutionID,
+		"updated_at":         time.Now().UTC(),
+		"version":            gorm.Expr("version + 1"),
+	}
+}
+
+// Update writes the ticket unconditionally — last-write-wins, the behaviour
+// every existing caller relies on. The version still advances, so a client using
+// If-Match detects this write too.
 func (t Ticket) Update(ctx context.Context) error {
 	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket.update")
 	defer span.End()
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
-	t.UpdatedAt = time.Now().UTC()
-	if err := connect().WithContext(ctx).Save(&t).Error; err != nil {
+	if err := connect().WithContext(ctx).Model(&Ticket{}).
+		Where("ticket_id = ? AND active = ?", t.TicketID, true).
+		Updates(t.mutableTicketAssignments()).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// UpdateIfVersion writes the ticket only if its stored version still equals
+// expected, returning ErrVersionConflict otherwise.
+//
+// The comparison and the write are ONE statement — the version is in the WHERE
+// clause of the UPDATE — so there is no window between checking and writing. A
+// read-then-write in application code would reintroduce exactly the race this
+// exists to close.
+func (t Ticket) UpdateIfVersion(ctx context.Context, expected int64) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket.update_if_version")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("ticket.id", t.TicketID),
+		attribute.Int64("ticket.expected_version", expected),
+	)
+
+	res := connect().WithContext(ctx).Model(&Ticket{}).
+		Where("ticket_id = ? AND active = ? AND version = ?", t.TicketID, true, expected).
+		Updates(t.mutableTicketAssignments())
+	if res.Error != nil {
+		span.RecordError(res.Error)
+		span.SetStatus(codes.Error, res.Error.Error())
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Either the version moved or the row is gone. The caller has already
+		// loaded and authorised the ticket, so a conflict is by far the likelier
+		// of the two and the more useful thing to report.
+		span.SetStatus(codes.Ok, "")
+		return ErrVersionConflict
 	}
 	span.SetStatus(codes.Ok, "")
 	return nil

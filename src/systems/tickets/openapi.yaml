@@ -145,6 +145,14 @@ paths:
       responses:
         '200':
           description: Ticket with comments
+          headers:
+            ETag:
+              description: |
+                The ticket's current version. Send it back as `If-Match` on `PUT`
+                to make the update conditional.
+              schema:
+                type: string
+                example: '"7"'
           content:
             application/json:
               schema:
@@ -163,9 +171,32 @@ paths:
         Replaces all mutable ticket fields. Omitting `status` or `priority`
         preserves the current value.
 
+        **Optimistic concurrency.** Without `If-Match` this is last-write-wins:
+        two callers can both read a ticket, both write, and both believe they
+        won, silently discarding the first change. Send the `ETag` from a `GET`
+        (or from a previous `PUT`) as `If-Match` to make the write conditional —
+        the server applies it only if nobody else has changed the ticket since,
+        and returns `412` otherwise with the current version in the `ETag` header
+        so the client knows what to rebase onto.
+
+        `If-Match` is optional and clients that omit it are unaffected, so this is
+        additive. `If-Match: *` requires only that the ticket exists. A malformed
+        value is rejected with `400` rather than ignored: silently dropping the
+        condition would turn a request that asked for safety into an overwrite.
+
         Permission: `updateTicket` on `{ns}/tickets/tickets/{id}` when called as
         `/tickets/{ns}/{id}`, or `tickets/tickets/{id}` on the legacy `/tickets/{id}`
         form.
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: |
+            The ticket version the caller believes is current, as returned in
+            `ETag`. `*` matches any existing ticket.
+          schema:
+            type: string
+            example: '"7"'
       requestBody:
         required: true
         content:
@@ -175,6 +206,12 @@ paths:
       responses:
         '200':
           description: Updated ticket with current comments
+          headers:
+            ETag:
+              description: The ticket's new version after this write.
+              schema:
+                type: string
+                example: '"8"'
           content:
             application/json:
               schema:
@@ -187,6 +224,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '412':
+          description: |
+            The `If-Match` version did not match: somebody else changed the ticket
+            first and nothing was written. Re-read the ticket and retry.
+          headers:
+            ETag:
+              description: The ticket's current version, to rebase onto.
+              schema:
+                type: string
+                example: '"9"'
 
     delete:
       summary: Delete ticket
@@ -316,6 +363,14 @@ components:
           type: string
           format: uuid
           description: The board this ticket belongs to. Every ticket has a board.
+        version:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Optimistic-concurrency token, incremented by the server on every write
+            and also served as the `ETag` header. Send it back as `If-Match` on
+            `PUT` to avoid silently overwriting a concurrent change.
         created_by:
           type: string
           format: uuid

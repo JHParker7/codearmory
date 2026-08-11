@@ -67,6 +67,19 @@ type Ticket struct {
 	RunID            *string         `json:"run_id,omitempty"             gorm:"column:run_id"`
 	ForgeExecutionID *string         `json:"forge_execution_id,omitempty" gorm:"column:forge_execution_id"`
 	Active           bool            `json:"-"                  gorm:"column:active;default:true"`
+	// Version is the optimistic-concurrency token, incremented by the database on
+	// every write. Clients read it as an ETag on GET and send it back as If-Match
+	// on PUT to say "apply this only if nobody else has changed the ticket since I
+	// read it"; a mismatch is a 412 rather than a silent overwrite.
+	//
+	// Without this, PUT is last-write-wins: two callers can both read a ticket,
+	// both write, and both believe they won. That is invisible when two people
+	// edit a ticket in the portal, and it is a correctness problem when several
+	// agent hosts race to claim the same work.
+	//
+	// If-Match is OPTIONAL. A caller that omits it keeps the previous
+	// last-write-wins behaviour, so this is additive and needs no client flag day.
+	Version          int64           `json:"version"            gorm:"column:version;not null;default:0"`
 	Comments         []TicketComment `json:"comments"           gorm:"-"`
 	CreatedAt        time.Time       `json:"created_at"         gorm:"column:created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"         gorm:"column:updated_at"`

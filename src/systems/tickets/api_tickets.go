@@ -391,6 +391,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
+	setTicketETag(w, t)
 	json.NewEncoder(w).Encode(t) //nolint:errcheck
 }
 
@@ -555,10 +556,43 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		existing.ParentID = newParentID
 	}
 
-	if err := existing.Update(ctx); err != nil {
-		span.RecordError(err)
+	// Optimistic concurrency. An unconditional request keeps the previous
+	// last-write-wins behaviour; If-Match makes the write conditional on nobody
+	// having changed the ticket since the caller read it.
+	cond, ok := parseIfMatch(r.Header)
+	if !ok {
+		http.Error(w, "invalid If-Match header: expected a quoted version, a comma-separated list, or *", http.StatusBadRequest)
+		return
+	}
+	span.SetAttributes(
+		attribute.Bool("ticket.conditional", cond.present),
+		attribute.Int64("ticket.version", existing.Version),
+	)
+
+	var updateErr error
+	if cond.present && !cond.any {
+		updateErr = existing.UpdateIfVersion(ctx, cond.version)
+		if errors.Is(updateErr, ErrVersionConflict) {
+			// Re-read so the client is told the version it must rebase onto,
+			// rather than merely that it lost.
+			current, ferr := getTicket(ctx, id)
+			if ferr != nil {
+				http.Error(w, "ticket was modified by someone else", http.StatusPreconditionFailed)
+				return
+			}
+			span.SetStatus(codes.Ok, "")
+			slog.InfoContext(ctx, "ticket update rejected: version conflict",
+				"ticket_id", id, "user_id", userID, "expected", cond.version, "current", current.Version)
+			writePreconditionFailed(w, current.Version)
+			return
+		}
+	} else {
+		updateErr = existing.Update(ctx)
+	}
+	if updateErr != nil {
+		span.RecordError(updateErr)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.ErrorContext(ctx, "update ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update ticket: db error", "ticket_id", id, "user_id", userID, "error", updateErr)
 		http.Error(w, "failed to update ticket", http.StatusInternalServerError)
 		return
 	}
@@ -596,6 +630,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "ticket updated", "ticket_id", id, "user_id", userID, "status", req.Status)
 	w.Header().Set("Content-Type", "application/json")
+	setTicketETag(w, t)
 	json.NewEncoder(w).Encode(t) //nolint:errcheck
 }
 
