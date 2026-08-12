@@ -74,6 +74,23 @@ func (r *KubernetesRuntime) buildLeasePod(lease Lease, spec RunnerClass) *corev1
 		}
 	}
 
+	// Git refuses to operate on a repository whose top-level directory belongs to
+	// another user ("detected dubious ownership"), and that is exactly what a lease
+	// hands it: the working directory is a volume the kubelet creates as root,
+	// while commands run as the sandbox UID. The checkout itself survives — it
+	// writes files rather than reading a repository — so the failure appears later,
+	// on the first git command an agent runs, which makes it read like a bug in the
+	// agent rather than in the sandbox it was given.
+	//
+	// Declared through GIT_CONFIG_* rather than a `git config --global` call
+	// because there is nowhere to write a global config: the root filesystem is
+	// read-only, and every command would otherwise have to remember to set it.
+	envVars = append(envVars,
+		corev1.EnvVar{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		corev1.EnvVar{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
+		corev1.EnvVar{Name: "GIT_CONFIG_VALUE_0", Value: lease.workDir()},
+	)
+
 	privileged := spec.Privileged && r.kernelIsolated
 	podSC, containerSC := podSecurityContexts(privileged)
 

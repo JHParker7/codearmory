@@ -379,3 +379,38 @@ func TestFirstNonEmptyLine(t *testing.T) {
 		t.Error("expected a fallback rather than an empty diagnostic")
 	}
 }
+
+// Git refuses a repository whose top-level directory belongs to another user,
+// and a lease's working directory is exactly that: a volume the kubelet creates
+// as root, used by commands running as the sandbox UID. Found on a live ticket —
+// the clone succeeded and the agent's first `git checkout -b` failed with
+// "detected dubious ownership", which reads as an agent bug rather than a
+// sandbox one.
+func TestBuildLeasePod_DeclaresTheWorkspaceSafeForGit(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	lease := leaseFixture()
+	lease.Checkout = &CheckoutSpec{}
+	env := map[string]string{}
+	for _, e := range r.buildLeasePod(lease, stdRunnerSpec()).Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["GIT_CONFIG_COUNT"] != "1" || env["GIT_CONFIG_KEY_0"] != "safe.directory" {
+		t.Fatalf("no safe.directory declaration; every git command in the lease would fail: %v", env)
+	}
+	if got := env["GIT_CONFIG_VALUE_0"]; got != lease.workDir() {
+		t.Errorf("safe.directory = %q, want the lease's working directory %q", got, lease.workDir())
+	}
+}
+
+// A volume that claims the working directory moves it, and the declaration has
+// to follow — otherwise it names a path the repository is not in.
+func TestBuildLeasePod_SafeDirectoryFollowsAWorkdirVolume(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	lease := leaseFixture()
+	lease.Volumes = []VolumeMount{{WorkflowID: "wf", Name: "src", MountPath: "/src", Workdir: true}}
+	for _, e := range r.buildLeasePod(lease, stdRunnerSpec()).Spec.Containers[0].Env {
+		if e.Name == "GIT_CONFIG_VALUE_0" && e.Value != "/src" {
+			t.Errorf("safe.directory = %q, want /src", e.Value)
+		}
+	}
+}
