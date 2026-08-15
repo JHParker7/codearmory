@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 // Runtime service-account registration lets the builder service bring a non-core
@@ -73,19 +71,13 @@ func handleRegisterServiceAccount(w http.ResponseWriter, r *http.Request) {
 	// service comes back and that genuinely is a change.
 	if existing, err := (ServiceAccount{ServiceName: req.ServiceName}).Get(r.Context()); err == nil {
 		acct := existing.(ServiceAccount)
-		if acct.Active && acct.HashedBootstrapKey != "" &&
-			bcrypt.CompareHashAndPassword([]byte(acct.HashedBootstrapKey), []byte(req.Key)) == nil {
+		if ok, _ := verifyServiceKey(acct.HashedBootstrapKey, req.Key); acct.Active && ok {
 			slog.DebugContext(r.Context(), "service account already registered with this key", "service", req.ServiceName)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Key), 12)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	upsertServiceAccountDB(r.Context(), req.ServiceName, string(hash))
+	upsertServiceAccountDB(r.Context(), req.ServiceName, hashServiceKey(req.Key))
 	slog.InfoContext(r.Context(), "service account registered at runtime", "service", req.ServiceName)
 	writeAudit(r.Context(), "builder", "service", "service_account.register", req.ServiceName, "")
 	w.WriteHeader(http.StatusNoContent)

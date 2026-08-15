@@ -19,7 +19,6 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -123,12 +122,9 @@ func seedServiceAccounts(ctx context.Context) {
 		}
 		name, key := entry[:idx], entry[idx+1:]
 		coreServiceNames[name] = true
-		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
-		if err != nil {
-			slog.ErrorContext(ctx, "seedServiceAccounts: bcrypt failed", "name", name, "error", err)
-			continue
-		}
-		upsertServiceAccountDB(ctx, name, string(hash))
+		// Hashing a high-entropy key cannot fail, so there is no error to handle
+		// here any more — bcrypt's could, which is why this used to branch.
+		upsertServiceAccountDB(ctx, name, hashServiceKey(key))
 	}
 }
 
