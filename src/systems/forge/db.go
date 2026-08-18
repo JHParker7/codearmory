@@ -1156,3 +1156,27 @@ func markLeaseReady(ctx context.Context, leaseID string) (bool, error) {
 	}
 	return res.RowsAffected > 0, nil
 }
+
+// leasesWithLiveExecutions returns the leases that currently have a command
+// pending or running.
+//
+// The lease reaper needs this because LastUsedAt is bumped on DISPATCH and never
+// again, so a long command leaves its lease looking idle for as long as it takes.
+// Reading the executions directly is the only honest answer to "is anything
+// happening in there".
+func leasesWithLiveExecutions(ctx context.Context) (map[string]bool, error) {
+	var ids []string
+	err := connect().WithContext(ctx).
+		Model(&Execution{}).
+		Where("lease_id <> '' AND status IN ?", []string{StatusPending, StatusRunning}).
+		Distinct().
+		Pluck("lease_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
+}

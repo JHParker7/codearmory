@@ -79,8 +79,23 @@ func reapLeases(ctx context.Context, reg *runtimeRegistry) {
 		known[lease.LeaseID] = true
 	}
 
+	// ONE QUERY FOR THE WHOLE PASS, not one per lease: the reaper runs every 30
+	// seconds against every active lease, and a per-lease round trip would make its
+	// cost grow with the number of sandboxes held.
+	busy, err := leasesWithLiveExecutions(ctx)
+	skipIdle := false
+	if err != nil {
+		// A lease that cannot be SHOWN to be working is not reaped for idleness.
+		// Failing closed would turn a database blip into every held sandbox being
+		// destroyed mid-command. The hard lifetime still applies, so nothing can
+		// hold a sandbox indefinitely by making this query fail.
+		slog.ErrorContext(ctx, "lease reaper: live executions unavailable, skipping idle collection",
+			"error", err)
+		busy, skipIdle = nil, true
+	}
+
 	for _, lease := range active {
-		reason := leaseExpiryReason(lease, now)
+		reason := leaseExpiryReason(lease, now, skipIdle || busy[lease.LeaseID])
 		if reason == "" {
 			continue
 		}
@@ -102,10 +117,27 @@ func reapLeases(ctx context.Context, reg *runtimeRegistry) {
 // The order matters: lifetime is checked before idleness so a lease that is both
 // is reported as the more specific of the two, which is what a caller wondering
 // where their sandbox went needs to read.
-func leaseExpiryReason(lease Lease, now time.Time) string {
+// busy reports whether a command is still running in the lease. IDLENESS IS
+// MEASURED FROM DISPATCH, NOT COMPLETION — LastUsedAt is bumped when an exec is
+// submitted and never again — so a single long command leaves the lease looking
+// untouched for as long as it runs, and the reaper kills the sandbox out from
+// under a container that is working flat out.
+//
+// Measured against a coding agent held in one lease: last_used_at at +4 seconds,
+// reaped "idle" at +5:17, mid-edit. The caller then got 409 on its next command
+// and reported a stage that had genuinely done its work as failed. Any caller
+// whose test suite outlives the idle timeout has the same exposure.
+//
+// Only IDLENESS is forgiven. The hard lifetime still applies, so a runaway
+// command cannot hold a sandbox forever by never finishing — which is the case
+// the maximum lifetime exists for.
+func leaseExpiryReason(lease Lease, now time.Time, busy bool) string {
 	switch {
 	case now.After(lease.hardDeadline()):
 		return "exceeded its maximum lifetime"
+	case busy:
+		// Working, whatever the idle clock says.
+		return ""
 	case now.After(lease.idleDeadline()):
 		return "idle"
 	case lease.Status == leaseStarting && now.After(lease.CreatedAt.Add(time.Duration(leaseStartTimeoutSecs)*time.Second)):

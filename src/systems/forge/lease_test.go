@@ -173,6 +173,7 @@ func TestLeaseExpiryReason(t *testing.T) {
 	cases := []struct {
 		name  string
 		lease Lease
+		busy  bool
 		want  string
 	}{
 		{
@@ -191,6 +192,26 @@ func TestLeaseExpiryReason(t *testing.T) {
 			want:  "exceeded its maximum lifetime",
 		},
 		{
+			// IDLENESS IS MEASURED FROM DISPATCH, NOT COMPLETION: LastUsedAt is bumped
+			// when a command is submitted and never again, so a long-running command
+			// leaves its lease looking untouched for as long as it takes. Measured
+			// against a coding agent held in one lease — last used at +4 seconds,
+			// reaped "idle" at +5:17, mid-edit — after which the caller's next
+			// command got a 409 and a stage that had done its work reported failure.
+			name:  "working, however long since the command was dispatched",
+			lease: Lease{Status: leaseReady, CreatedAt: now.Add(-20 * time.Minute), StartedAt: ptr(now.Add(-20 * time.Minute)), LastUsedAt: ptr(now.Add(-10 * time.Minute)), IdleTimeoutSecs: 300, MaxLifetimeSecs: 3600},
+			busy:  true,
+			want:  "",
+		},
+		{
+			// ONLY IDLENESS IS FORGIVEN. A command that never finishes must not hold a
+			// sandbox forever — that is precisely what the maximum lifetime is for.
+			name:  "working, but past its maximum lifetime",
+			lease: Lease{Status: leaseReady, CreatedAt: now.Add(-2 * time.Hour), StartedAt: &recent, LastUsedAt: &recent, IdleTimeoutSecs: 300, MaxLifetimeSecs: 3600},
+			busy:  true,
+			want:  "exceeded its maximum lifetime",
+		},
+		{
 			name:  "stuck starting after a restart",
 			lease: Lease{Status: leaseStarting, CreatedAt: now.Add(-time.Duration(leaseStartTimeoutSecs+60) * time.Second), IdleTimeoutSecs: 99999, MaxLifetimeSecs: 99999},
 			want:  "never finished starting",
@@ -198,7 +219,7 @@ func TestLeaseExpiryReason(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := leaseExpiryReason(tc.lease, now); got != tc.want {
+			if got := leaseExpiryReason(tc.lease, now, tc.busy); got != tc.want {
 				t.Errorf("leaseExpiryReason = %q, want %q", got, tc.want)
 			}
 		})
