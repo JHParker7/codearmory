@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -433,5 +435,53 @@ func TestBuildLeasePod_SafeDirectoryFollowsAWorkdirVolume(t *testing.T) {
 		if e.Name == "GIT_CONFIG_VALUE_0" && e.Value != "/src" {
 			t.Errorf("safe.directory = %q, want /src", e.Value)
 		}
+	}
+}
+
+// A lease that has just FINISHED a long command must not be instantly reapable.
+//
+// last_used_at was stamped only at dispatch, so an eight-minute command left the
+// lease looking eight minutes idle the moment it returned. Measured: an agent
+// command ran 8m16s, succeeded, and the reaper saw idle_secs=496 against a 300s
+// limit in the same instant — so the very next submission, the verification of the
+// work that had just succeeded, was refused because the sandbox was gone. The
+// stage failed on work it had actually done.
+//
+// Idle has to mean "nothing has been running or finishing here recently".
+func TestLeaseIsNotIdleImmediatelyAfterALongCommand(t *testing.T) {
+	requireForgeDB(t)
+
+	now := time.Now().UTC()
+	dispatched := now.Add(-8 * time.Minute) // when the command started
+	leaseID := uuid.New().String()
+
+	lease := Lease{
+		LeaseID: leaseID, UserID: "user-x", Image: "alpine:3.19", RunnerClass: "standard",
+		Status: leaseReady, CreatedAt: dispatched, StartedAt: &dispatched, LastUsedAt: &dispatched,
+		IdleTimeoutSecs: 300, MaxLifetimeSecs: 3600,
+	}
+	if err := connect().Create(&lease).Error; err != nil {
+		t.Fatalf("create lease: %v", err)
+	}
+	t.Cleanup(func() {
+		connect().Exec(`DELETE FROM leases WHERE lease_id = ?`, leaseID) //nolint:errcheck
+	})
+
+	// The bug, stated as a precondition: judged on dispatch time alone it is idle.
+	if got := leaseExpiryReason(lease, now, false); got != "idle" {
+		t.Fatalf("precondition: leaseExpiryReason() = %q, want %q — the scenario no longer reproduces", got, "idle")
+	}
+
+	// What the worker now does when the command finishes.
+	if err := touchLease(context.Background(), leaseID); err != nil {
+		t.Fatalf("touchLease: %v", err)
+	}
+
+	var after Lease
+	if err := connect().Where("lease_id = ?", leaseID).First(&after).Error; err != nil {
+		t.Fatalf("re-read lease: %v", err)
+	}
+	if got := leaseExpiryReason(after, time.Now().UTC(), false); got != "" {
+		t.Errorf("leaseExpiryReason() = %q, want it kept: the next command has nowhere to run", got)
 	}
 }

@@ -289,6 +289,26 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	if err := exec.Complete(ctx, status, result); err != nil {
 		slog.ErrorContext(ctx, "worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
 	}
+
+	// AND AGAIN ON THE WAY OUT. The lease was touched before the command started,
+	// which keeps a long command from looking idle while it runs — but it leaves
+	// last_used_at pinned at DISPATCH, so the moment the command finishes the lease
+	// is retroactively as idle as the command was long.
+	//
+	// Measured: an 8m16s agent command returned successfully, the reaper saw
+	// idle_secs=496 against a 300s limit in the same instant, and the caller's very
+	// next submission — the verification of the work that had just succeeded — was
+	// refused because the sandbox had been torn down underneath it. The stage
+	// failed on work it had actually done.
+	//
+	// Idle has to mean "nothing has been running or finishing here recently", so the
+	// window starts when the sandbox actually went quiet.
+	if exec.LeaseID != "" {
+		if err := touchLease(ctx, exec.LeaseID); err != nil {
+			slog.WarnContext(ctx, "worker: could not record lease completion",
+				"lease_id", exec.LeaseID, "error", err)
+		}
+	}
 }
 
 // wrapOutputEnv appends a trailer to a `[<shell> -c <script>]` command so that,
