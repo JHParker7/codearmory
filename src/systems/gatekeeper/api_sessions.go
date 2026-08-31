@@ -236,12 +236,15 @@ type permissionSpec struct {
 // workflows does this for a run; forge does it for an artifact step, where a sandbox
 // needs a bearer for the artifact store; git_connector does it to authorize a clone
 // against git-factory as the user the clone is for, instead of holding a shared
-// east-west key. All three are safe for the same reason: every permission in the
+// east-west key; blacksmith does it to give each agent run a temp identity scoped to
+// the user who triggered it, so an agent can never push or file or read anything the
+// user could not. All four are safe for the same reason: every permission in the
 // request is verified against the OWNER's own access before it is included, so a
 // minted role can never exceed what the user already has — the caller is choosing a
 // subset, not granting itself authority.
 func canMintScopedRoles(service string) bool {
-	return service == "workflows" || service == "forge" || service == "git_connector"
+	return service == "workflows" || service == "forge" ||
+		service == "git_connector" || service == "blacksmith"
 }
 
 func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
