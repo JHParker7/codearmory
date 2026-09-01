@@ -465,6 +465,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 				Matrix:  ref.Matrix,
 				Scatter: ref.Scatter,
 				MapID:   ref.MapID,
+				LoopID:  ref.LoopID,
 			})
 			continue
 		}
@@ -491,7 +492,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 		// definition, so it is copied onto the local step copy like the name override.
 		s.AllowUnresolved = ref.AllowUnresolved
 		s.Permissions = ref.Permissions
-		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID})
+		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID, LoopID: ref.LoopID})
 	}
 	return result, nil
 }

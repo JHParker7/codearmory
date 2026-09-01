@@ -374,6 +374,8 @@ type createWorkflowRequest struct {
 	Routes []WorkflowRoute `json:"routes,omitempty"`
 	// Maps declare the map regions steps join via map_id — see MapDef.
 	Maps []MapDef `json:"maps,omitempty"`
+	// Loops declare the loops steps join via loop_id — see LoopDef.
+	Loops []LoopDef `json:"loops,omitempty"`
 	// Ticket opts every run of this workflow into being mirrored to a ticket — see
 	// TicketConfig. Omit it and nothing changes.
 	Ticket *TicketConfig `json:"ticket,omitempty"`
@@ -544,6 +546,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Outputs:     req.Outputs,
 		Routes:      req.Routes,
 		Maps:        req.Maps,
+		Loops:       req.Loops,
 		Ticket:      req.Ticket,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
@@ -585,7 +588,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps); msg != "" {
+	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps, wf.Loops); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -824,7 +827,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if msg := validateGraph(newSteps, req.Routes, req.Maps); msg != "" {
+	if msg := validateGraph(newSteps, req.Routes, req.Maps, req.Loops); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -835,6 +838,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Description = req.Description
 	existing.Routes = req.Routes
 	existing.Maps = req.Maps
+	existing.Loops = req.Loops
 	// Guard like the timeout and project below: the state_machine document carries no
 	// ticket field, and a state_machine PUT is the round-trippable edit shape (the
 	// enriched steps array fails validateStepRefShape), so an unguarded assignment made

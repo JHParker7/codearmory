@@ -99,7 +99,12 @@ type nodeResult struct {
 	// region is set when this result is a map region rather than one node; every
 	// member then takes `state`, and regionOutputs carries each member's aggregated
 	// output across iterations.
-	region        *mapRegion
+	region *mapRegion
+	// loop is set when this result is a loop rather than one node or a map region.
+	// Like region, every member takes `state` and regionOutputs carries each member's
+	// output — for a loop, from the iteration that satisfied the exit condition (or
+	// the last iteration when it did not).
+	loop          *loopRegion
 	regionOutputs map[string]string
 	// legs is how many parallel executions the node expanded into (matrix/scatter
 	// legs, or a map region's iterations). 0/1 means it ran once. Reported to the
@@ -216,6 +221,9 @@ func (g *workflowGraph) readyNodes(st *runState) []string {
 		if g.regionOf[ws.Name] != "" {
 			continue // region members launch as a unit, via readyRegions
 		}
+		if g.loopOf[ws.Name] != "" {
+			continue // loop members launch as a unit, via readyLoops
+		}
 		if g.nodeReady(st, ws.Name) {
 			ready = append(ready, ws.Name)
 		}
@@ -226,13 +234,13 @@ func (g *workflowGraph) readyNodes(st *runState) []string {
 // boundary splits a region's inbound route indices (from outside in) from the rest.
 // Routes wholly inside the region belong to an iteration's subgraph, not to the
 // region's own readiness.
-func (g *workflowGraph) inboundOf(region *mapRegion) []int {
-	inside := make(map[string]bool, len(region.nodes))
-	for _, n := range region.nodes {
+func (g *workflowGraph) inboundOf(nodes []string) []int {
+	inside := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
 		inside[n] = true
 	}
 	var in []int
-	for _, n := range region.nodes {
+	for _, n := range nodes {
 		for _, ri := range g.in[n] {
 			if !inside[g.routes[ri].From] {
 				in = append(in, ri)
@@ -247,9 +255,9 @@ func (g *workflowGraph) inboundOf(region *mapRegion) []int {
 // A region is ONE super-node: it waits on the routes crossing INTO it, using the same
 // all-resolved/at-least-one-taken rule a node does. With no external inbound routes it
 // is an entry unit, ready at t=0.
-func (g *workflowGraph) regionReady(st *runState, region *mapRegion) bool {
+func (g *workflowGraph) regionReady(st *runState, nodes []string) bool {
 	pending := false
-	for _, n := range region.nodes {
+	for _, n := range nodes {
 		if st.nodes[n] == nodePending {
 			pending = true
 		} else {
@@ -259,7 +267,7 @@ func (g *workflowGraph) regionReady(st *runState, region *mapRegion) bool {
 	if !pending {
 		return false
 	}
-	inbound := g.inboundOf(region)
+	inbound := g.inboundOf(nodes)
 	if len(inbound) == 0 {
 		return true
 	}
@@ -277,13 +285,13 @@ func (g *workflowGraph) regionReady(st *runState, region *mapRegion) bool {
 
 // regionSkipped reports whether every route into a region resolved with none taken,
 // so the whole region is skipped — the region-level twin of a skipped node.
-func (g *workflowGraph) regionSkipped(st *runState, region *mapRegion) bool {
-	for _, n := range region.nodes {
+func (g *workflowGraph) regionSkipped(st *runState, nodes []string) bool {
+	for _, n := range nodes {
 		if st.nodes[n] != nodePending {
 			return false
 		}
 	}
-	inbound := g.inboundOf(region)
+	inbound := g.inboundOf(nodes)
 	if len(inbound) == 0 {
 		return false
 	}
@@ -308,8 +316,28 @@ func (g *workflowGraph) readyRegions(st *runState) []*mapRegion {
 		if r == nil || r.nodes[0] != ws.Name {
 			continue
 		}
-		if g.regionReady(st, r) {
+		if g.regionReady(st, r.nodes) {
 			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// readyLoops returns the loops that may expand now — the sequential-repeat twin of
+// readyRegions. A loop is a super-node with the same ready rule as a map region.
+func (g *workflowGraph) readyLoops(st *runState) []*loopRegion {
+	var out []*loopRegion
+	for _, ws := range g.steps {
+		id := g.loopOf[ws.Name]
+		if id == "" {
+			continue
+		}
+		l := g.loops[id]
+		if l == nil || l.nodes[0] != ws.Name {
+			continue
+		}
+		if g.regionReady(st, l.nodes) {
+			out = append(out, l)
 		}
 	}
 	return out
@@ -408,12 +436,26 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				for _, n := range region.nodes {
 					st.nodes[n] = nodeRunning
 				}
-				visible := ic.withInbound(g.visibleForRegion(region, st.outputs))
+				visible := ic.withInbound(g.visibleForRegion(region.nodes, st.outputs))
 				inFlight++
 				go func(region *mapRegion, visible map[string]string) {
 					agg, status, iters := p.runMapRegion(ctx, store, runID, workflowID, g, region, inputs, visible, depth, legSem)
 					resCh <- nodeResult{region: region, state: statusToNodeState(status), regionOutputs: agg, legs: iters}
 				}(region, visible)
+			}
+			// Loops expand as one unit too: every member starts together and the loop's
+			// successors wait for it. Unlike a region, its body runs SEQUENTIALLY, in
+			// place, until the exit condition holds or the limit is reached (loopregion.go).
+			for _, loop := range g.readyLoops(st) {
+				for _, n := range loop.nodes {
+					st.nodes[n] = nodeRunning
+				}
+				visible := ic.withInbound(g.visibleForRegion(loop.nodes, st.outputs))
+				inFlight++
+				go func(loop *loopRegion, visible map[string]string) {
+					agg, status, iters := p.runLoopRegion(ctx, store, runID, workflowID, g, loop, inputs, visible, depth, legSem)
+					resCh <- nodeResult{loop: loop, state: statusToNodeState(status), regionOutputs: agg, legs: iters}
+				}(loop, visible)
 			}
 			for _, n := range g.readyNodes(st) {
 				ws := g.steps[g.index[n]]
@@ -459,9 +501,15 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				st.outputs[n] = out
 			}
 		}
+		if r.loop != nil {
+			names = r.loop.nodes
+			for n, out := range r.regionOutputs {
+				st.outputs[n] = out
+			}
+		}
 		for _, n := range names {
 			st.nodes[n] = r.state
-			if r.region == nil && r.state == nodeCompleted {
+			if r.region == nil && r.loop == nil && r.state == nodeCompleted {
 				st.outputs[n] = r.output
 			}
 			st.ticket.stepDone(ctx, n, r.state, r.legs)
@@ -494,15 +542,22 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 // not-taken, then cascades — the region-level twin of a skipped node, so a map behind
 // an untaken branch does not wedge the frontier.
 func (p *WorkerPool) skipSkippedRegions(ctx context.Context, g *workflowGraph, st *runState, runID string, inputs map[string]string) {
-	for _, r := range g.regions {
-		if !g.regionSkipped(st, r) {
-			continue
-		}
-		for _, n := range r.nodes {
+	skip := func(nodes []string) {
+		for _, n := range nodes {
 			st.nodes[n] = nodeSkipped
 		}
-		for _, n := range r.nodes {
+		for _, n := range nodes {
 			p.resolveOutbound(ctx, g, st, runID, inputs, n)
+		}
+	}
+	for _, r := range g.regions {
+		if g.regionSkipped(st, r.nodes) {
+			skip(r.nodes)
+		}
+	}
+	for _, l := range g.loops {
+		if g.regionSkipped(st, l.nodes) {
+			skip(l.nodes)
 		}
 	}
 }
@@ -511,13 +566,13 @@ func (p *WorkerPool) skipSkippedRegions(ctx context.Context, g *workflowGraph, s
 // of its members' ancestors, minus the region's own nodes (an iteration's own outputs
 // are produced inside it). This is what lets a body reference a step upstream of the
 // map, e.g. ${steps.discover.output}.
-func (g *workflowGraph) visibleForRegion(region *mapRegion, outputs map[string]string) map[string]string {
-	inside := make(map[string]bool, len(region.nodes))
-	for _, n := range region.nodes {
+func (g *workflowGraph) visibleForRegion(nodes []string, outputs map[string]string) map[string]string {
+	inside := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
 		inside[n] = true
 	}
 	v := map[string]string{}
-	for _, n := range region.nodes {
+	for _, n := range nodes {
 		for a := range g.ancestors[n] {
 			if inside[a] {
 				continue

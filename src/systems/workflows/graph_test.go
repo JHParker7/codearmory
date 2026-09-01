@@ -122,11 +122,11 @@ func TestVisibleFor_ScopesToAncestors(t *testing.T) {
 func TestValidateGraph(t *testing.T) {
 	steps := stepsNamed("a", "b", "c")
 	// Derived-only workflows have no routes to validate.
-	if msg := validateGraph(steps, nil, nil); msg != "" {
+	if msg := validateGraph(steps, nil, nil, nil); msg != "" {
 		t.Fatalf("no routes should validate, got %q", msg)
 	}
 	ok := []WorkflowRoute{{From: "a", To: "b"}, {From: "b", To: "c"}}
-	if msg := validateGraph(stepsNamed("a", "b", "c"), ok, nil); msg != "" {
+	if msg := validateGraph(stepsNamed("a", "b", "c"), ok, nil, nil); msg != "" {
 		t.Fatalf("valid graph rejected: %q", msg)
 	}
 
@@ -157,7 +157,7 @@ func TestValidateGraph(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := validateGraph(tc.steps, tc.rts, nil)
+			msg := validateGraph(tc.steps, tc.rts, nil, nil)
 			if !strings.Contains(msg, tc.want) {
 				t.Fatalf("validateGraph = %q, want it to contain %q", msg, tc.want)
 			}
@@ -171,7 +171,7 @@ func TestValidateGraph_TooManyRoutes(t *testing.T) {
 	for i := range rts {
 		rts[i] = WorkflowRoute{From: "a", To: "b", When: fmt.Sprintf("inputs.x == %q", fmt.Sprint(i))}
 	}
-	if msg := validateGraph(steps, rts, nil); !strings.Contains(msg, "too many routes") {
+	if msg := validateGraph(steps, rts, nil, nil); !strings.Contains(msg, "too many routes") {
 		t.Fatalf("validateGraph = %q, want too many routes", msg)
 	}
 }

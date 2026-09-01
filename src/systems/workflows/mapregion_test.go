@@ -43,7 +43,7 @@ func mapPipeline() ([]WorkflowStep, []MapDef, []WorkflowRoute) {
 
 func TestMapRegion_GroupsMembersAndValidates(t *testing.T) {
 	steps, defs, routes := mapPipeline()
-	if msg := validateGraph(steps, routes, defs); msg != "" {
+	if msg := validateGraph(steps, routes, defs, nil); msg != "" {
 		t.Fatalf("valid map pipeline rejected: %s", msg)
 	}
 	regions := regionsOf(steps, defs)
@@ -65,7 +65,7 @@ func TestMapRegion_GroupsMembersAndValidates(t *testing.T) {
 func TestMapRegion_SubGraphExcludesBoundaryRoutes(t *testing.T) {
 	steps, defs, routes := mapPipeline()
 	g := newGraph(steps, routes).withMaps(defs)
-	sub := g.subGraph(g.regions["m1"])
+	sub := g.subGraph(g.regions["m1"].nodes)
 
 	if len(sub.steps) != 3 {
 		t.Fatalf("subgraph steps = %d, want 3", len(sub.steps))
@@ -87,7 +87,7 @@ func TestMapRegion_SubGraphExcludesBoundaryRoutes(t *testing.T) {
 func TestMapRegion_SubGraphKeepsWorkflowStepIndices(t *testing.T) {
 	steps, defs, routes := mapPipeline()
 	g := newGraph(steps, routes).withMaps(defs)
-	sub := g.subGraph(g.regions["m1"])
+	sub := g.subGraph(g.regions["m1"].nodes)
 
 	for name, want := range map[string]int{"build": 1, "test": 2, "push": 3} {
 		if got := sub.stepIndex(name); got != want {
@@ -455,7 +455,7 @@ func TestMapRegion_IterationSeesUpstreamOutputs(t *testing.T) {
 	steps = append([]WorkflowStep{plain("commit")}, steps...)
 	routes = append(routes, WorkflowRoute{From: "commit", To: "discover"})
 
-	if msg := validateGraph(steps, routes, defs); msg != "" {
+	if msg := validateGraph(steps, routes, defs, nil); msg != "" {
 		t.Fatalf("graph rejected: %s", msg)
 	}
 	g := newGraph(steps, routes).withMaps(defs)
@@ -470,7 +470,7 @@ func TestMapRegion_IterationSeesUpstreamOutputs(t *testing.T) {
 		"discover": `{"IMAGES":"git workflows"}`,
 		"build":    "inside the region",
 	}
-	visible := g.visibleForRegion(region, outputs)
+	visible := g.visibleForRegion(region.nodes, outputs)
 
 	if got := visible["commit"]; got != outputs["commit"] {
 		t.Errorf("commit output not visible inside the region (got %q) — a mapped step could not resolve ${steps.commit.output.SHA}", got)

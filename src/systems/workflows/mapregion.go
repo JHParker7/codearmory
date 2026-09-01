@@ -258,9 +258,9 @@ func iterVolume(base string, regionKey, i int) string {
 // BOTH ends are inside it. Routes crossing the boundary are the region's inbound and
 // outbound edges — the scheduler resolves those against the region as a whole, so an
 // iteration must not see them.
-func (g *workflowGraph) subGraph(region *mapRegion) *workflowGraph {
-	inside := make(map[string]bool, len(region.nodes))
-	for _, n := range region.nodes {
+func (g *workflowGraph) subGraph(nodes []string) *workflowGraph {
+	inside := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
 		inside[n] = true
 	}
 	var steps []WorkflowStep
@@ -308,7 +308,7 @@ func (p *WorkerPool) runMapRegion(
 		return nil, p.mapFail(runID, g, region, fmt.Sprintf("map %q produced no values to run", region.def.ID)), 0
 	}
 
-	sub := g.subGraph(region)
+	sub := g.subGraph(region.nodes)
 	// Built once for the whole region, not per iteration: it is the same set for every
 	// value, and a wide fan-out would otherwise rebuild an identical map N times.
 	known := g.stepNames()
