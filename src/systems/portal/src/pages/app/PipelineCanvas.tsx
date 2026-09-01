@@ -641,6 +641,23 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
   }, [maps, blocks, posOf, editable]);
+
+  /** The bounding box of each loop's member nodes — a loop reads as an enclosure like a
+   * map region. Drawn in BOTH views, because a loop's members (unlike a map's) are not
+   * collapsed into a container node, so they sit at their own positions either way. */
+  const loopBoxes = useMemo(() => {
+    const ids = [...new Set(blocks.map((b) => b.loopId).filter(Boolean))] as string[];
+    return ids.map((id) => {
+      const pts = blocks.filter((b) => b.loopId === id).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
+      if (pts.length === 0) return null;
+      const x = Math.min(...pts.map((p) => p.x)) - 12;
+      const y = Math.min(...pts.map((p) => p.y)) - 22;
+      const x2 = Math.max(...pts.map((p) => p.x)) + NODE_W + 12;
+      const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 12;
+      return { id, x, y, w: x2 - x, h: y2 - y };
+    }).filter(Boolean) as { id: string; x: number; y: number; w: number; h: number }[];
+  }, [blocks, posOf]);
+
   const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
   const height = Math.max(lanes.bottom + PAD, 260);
 
@@ -924,6 +941,18 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               </span>
             </div>
           ))}
+          {/* Loop enclosures: a loop's body repeats in place until a condition holds, so
+              it too reads as a box around its steps — amber to distinguish it from a map. */}
+          {loopBoxes.map((l) => (
+            <div key={l.id} style={{
+              position: 'absolute', left: l.x, top: l.y, width: l.w, height: l.h,
+              border: `1px dashed ${T.amber}`, background: T.amberSoft, pointerEvents: 'none',
+            }}>
+              <span style={{ position: 'absolute', top: -8, left: 8, background: T.bg, padding: '0 4px', fontFamily: T.mono, fontSize: 9, color: T.amber }}>
+                ⟳ loop · {l.id}
+              </span>
+            </div>
+          ))}
           {/* Edges are drawn under the nodes so a route never covers a step's text. */}
           <svg width={width} height={height} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <defs>
@@ -1091,6 +1120,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                       {isGate ? 'manual approval' : action}
                       {b.matrix?.var ? ` · ⊞ ${b.matrix.var}` : ''}
                       {b.scatter?.regex ? ' · ⊟ scatter' : ''}
+                      {b.loopId ? ` · ⟳ ${b.loopId}` : ''}
                     </>
                   )}
                 </div>

@@ -349,6 +349,8 @@ export interface WorkflowStepRef {
   /** The map region this step belongs to. Mutually exclusive with
    * matrix/scatter, which are the step's own fan-out. */
   map_id?: string;
+  /** The loop this step belongs to. Mutually exclusive with map_id/matrix/scatter. */
+  loop_id?: string;
 }
 
 /** A directed edge between two steps, identified by step name — the workflows API's
@@ -383,6 +385,21 @@ export interface WorkflowMapDef {
   size_mb?: number;
   medium?: string;
   outputs?: string[];
+}
+
+/** A loop: a subgraph (steps sharing loop_id) repeated SEQUENTIALLY, in place, on the
+ * one shared volume, until `until` holds or `limit` iterations run (hard max 50). The
+ * retry/converge primitive — unlike a map it does not fan out or clone. The workflows
+ * API's LoopDef. */
+export interface WorkflowLoopDef {
+  id: string;
+  /** Max iterations, clamped to [1, 50]. */
+  limit: number;
+  /** Exit condition — a route expression (steps.NAME.status/.output/.json.FIELD). The
+   * loop stops the first time it is true; empty means run exactly `limit` times. */
+  until?: string;
+  /** Optional: binds the 1-based iteration number for the body as ${loop.<var>}. */
+  var?: string;
 }
 
 /** A run parameter a pipeline declares. `default` is applied when the trigger omits
@@ -437,6 +454,8 @@ export interface Workflow {
   routes?: WorkflowRoute[];
   /** The map regions steps join via map_id. */
   maps?: WorkflowMapDef[];
+  /** The loops steps join via loop_id. */
+  loops?: WorkflowLoopDef[];
   /** Mirrors every run of this pipeline into a ticket (opt-in). The editor has no UI
    * for it, so it is carried through a save unchanged — dropping it would silently
    * turn mirroring off for a pipeline nobody meant to change. */
@@ -1046,7 +1065,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[]; timeout_secs?: number },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; loops?: WorkflowLoopDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[]; timeout_secs?: number },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -1054,7 +1073,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[]; timeout_secs: number }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; loops: WorkflowLoopDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[]; timeout_secs: number }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }

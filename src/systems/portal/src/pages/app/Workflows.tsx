@@ -457,6 +457,11 @@ function PipelineBuilderOverlay({
         // in steps[] order), so a route-less graph saves as the sequence it is.
         routes: routes.length > 0 ? routes : undefined,
         maps: maps.length > 0 ? maps : undefined,
+        // Carried through unchanged, like the ticket config below: this editor does not
+        // yet edit loops, and the step round-trip preserves each member's loop_id, so a
+        // save must keep the loop definitions too — omitting them would dissolve every
+        // loop the moment the pipeline is re-saved.
+        loops: initial?.loops && initial.loops.length > 0 ? initial.loops : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
         outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
         // Pipeline-level run timeout; 0 leaves the backend default (30m) in force.
