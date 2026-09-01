@@ -1582,6 +1582,50 @@ export interface GitFactoryMergeCheck {
   reason?: string;
 }
 
+/** A conversation comment on a pull request. */
+export interface GitFactoryPRComment {
+  id: string;
+  repo_id: string;
+  pull_id: string;
+  author: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A review verdict: `approved` | `changes_requested` | `commented`. */
+export interface GitFactoryPRReview {
+  id: string;
+  repo_id: string;
+  pull_id: string;
+  reviewer: string;
+  state: string;
+  body?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The merge-relevant summary of a PR's reviews (author self-approval excluded). */
+export interface GitFactoryReviewDecision {
+  approvals: number;
+  changes_requested: boolean;
+  reviews: number;
+}
+
+/** One check's verdict on a commit: `pending` | `success` | `failure` | `error`. */
+export interface GitFactoryCommitStatus {
+  id: string;
+  repo_id: string;
+  sha: string;
+  context: string;
+  state: string;
+  description?: string;
+  target_url?: string;
+  creator: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** A pull request plus its review payload — present only while the PR is open. */
 export interface GitFactoryPullDetail {
   pull_request: GitFactoryPull;
@@ -1590,6 +1634,10 @@ export interface GitFactoryPullDetail {
   diff?: string;
   commits?: number;
   merge?: GitFactoryMergeCheck;
+  /** The checks reported on the PR head commit (combined worst-first). */
+  status?: { sha: string; state: string; statuses: GitFactoryCommitStatus[] | null };
+  /** The review verdict, whether the target gates on it, and the full history. */
+  reviews?: { decision: GitFactoryReviewDecision; required: boolean; reviews: GitFactoryPRReview[] | null };
 }
 
 /** Who a repo is shared with: the owner's user id plus one row per (user, level). */
@@ -1732,6 +1780,25 @@ export function mergeGitFactoryPull(token: string, id: string, number: number | 
 
 export function closeGitFactoryPull(token: string, id: string, number: number | string) {
   return req<GitFactoryPull>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/close`, token);
+}
+
+export function listGitFactoryPRComments(token: string, id: string, number: number | string) {
+  return req<GitFactoryPRComment[] | null>('GET', `/codearmory_git_factory/repos/${id}/pulls/${number}/comments`, token);
+}
+
+export function createGitFactoryPRComment(token: string, id: string, number: number | string, body: string) {
+  return req<GitFactoryPRComment>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/comments`, token, { body });
+}
+
+/** Submit a review. `state` is `approved` | `changes_requested` | `commented`. */
+export function submitGitFactoryPRReview(
+  token: string,
+  id: string,
+  number: number | string,
+  state: string,
+  body?: string,
+) {
+  return req<GitFactoryPRReview>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/reviews`, token, { state, body: body ?? '' });
 }
 
 export function listGitFactoryCollaborators(token: string, id: string) {

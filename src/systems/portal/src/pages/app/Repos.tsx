@@ -30,6 +30,7 @@ import {
   listGitFactoryCommits, getGitFactoryCommit, compareGitFactoryRefs,
   getGitFactoryReadme, getGitFactoryTree, getGitFactoryBlob, writeGitFactoryBlob,
   listGitFactoryPulls, createGitFactoryPull, getGitFactoryPull, mergeGitFactoryPull, closeGitFactoryPull,
+  listGitFactoryPRComments, createGitFactoryPRComment, submitGitFactoryPRReview,
   listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
   listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
 } from '../../api/bff';
@@ -37,6 +38,7 @@ import type {
   GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
   GitFactoryFileChange, GitFactoryTreeEntry, GitFactoryBlob, GitFactoryPull,
   GitFactoryPullDetail, GitFactoryProtection,
+  GitFactoryPRComment, GitFactoryPRReview, GitFactoryCommitStatus,
 } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
 import {
@@ -836,6 +838,158 @@ function NewPull({ repo, branches, onCreated, onCancel }: {
   );
 }
 
+// ── pull-request review: checks, reviews, conversation ───────────────────────
+
+function statusTone(state: string): 'green' | 'red' | 'amber' | 'dim' {
+  if (state === 'success') return 'green';
+  if (state === 'failure' || state === 'error') return 'red';
+  if (state === 'pending') return 'amber';
+  return 'dim';
+}
+function statusColor(state: string): string {
+  if (state === 'success') return T.green;
+  if (state === 'failure' || state === 'error') return T.red;
+  if (state === 'pending') return T.amber;
+  return T.faint;
+}
+function reviewTone(state: string): 'green' | 'red' | 'dim' {
+  if (state === 'approved') return 'green';
+  if (state === 'changes_requested') return 'red';
+  return 'dim';
+}
+
+/** A titled card — the shared frame for the PR-detail review sections. */
+function Section({ title, children }: { title: ReactNode; children: ReactNode }) {
+  return (
+    <div style={{ border: `1px solid ${T.border}`, marginTop: 14 }}>
+      <div style={{ padding: '7px 11px', borderBottom: `1px solid ${T.border}`, background: T.cardHi, ...sectionLabel, marginBottom: 0 }}>{title}</div>
+      <div style={{ padding: 11 }}>{children}</div>
+    </div>
+  );
+}
+
+/** The checks reported on the PR head commit (a workflow run, a scanner, a linter). */
+function ChecksPanel({ status }: { status: NonNullable<GitFactoryPullDetail['status']> }) {
+  const list: GitFactoryCommitStatus[] = status.statuses ?? [];
+  return (
+    <Section title={<>checks · <span style={{ color: statusColor(status.state) }}>{status.state || 'none reported'}</span> · <span style={{ color: T.faint }}>{status.sha.slice(0, 8)}</span></>}>
+      {list.length === 0
+        ? <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>no checks have reported on this commit yet</div>
+        : list.map(s => (
+          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 0', fontFamily: T.mono, fontSize: 11 }}>
+            <Pill tone={statusTone(s.state)}>{s.state}</Pill>
+            <span style={{ color: T.textHi, flex: 'none' }}>{s.context}</span>
+            <span style={{ color: T.faint, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.description}</span>
+            {s.target_url && <a href={s.target_url} target="_blank" rel="noreferrer" style={{ color: T.green, fontSize: 10, flex: 'none' }}>details ↗</a>}
+          </div>
+        ))}
+    </Section>
+  );
+}
+
+/** Reviews: the verdict summary, the history, and a submit bar for an open PR. */
+function ReviewsPanel({ repo, number, reviews, canReview, onChanged }: {
+  repo: GitFactoryRepo; number: string;
+  reviews: NonNullable<GitFactoryPullDetail['reviews']>;
+  canReview: boolean; onChanged: () => void;
+}) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const list: GitFactoryPRReview[] = reviews.reviews ?? [];
+  const d = reviews.decision;
+
+  const submit = async (state: string) => {
+    setBusy(state); setError(null);
+    try {
+      await submitGitFactoryPRReview(token, repo.id, number, state, body);
+      setBody(''); onChanged();
+    } catch (e) { setError(errorMessage(e)); } finally { setBusy(null); }
+  };
+
+  return (
+    <Section title={<>reviews · <span style={{ color: d.approvals > 0 ? T.green : T.faint }}>{d.approvals} approval{d.approvals === 1 ? '' : 's'}</span>{d.changes_requested && <span style={{ color: T.red }}> · changes requested</span>}{reviews.required && <span style={{ color: T.faint }}> · required to merge</span>}</>}>
+      {list.length === 0
+        ? <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>no reviews yet</div>
+        : list.map(r => (
+          <div key={r.id} style={{ padding: '6px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Pill tone={reviewTone(r.state)}>{r.state === 'changes_requested' ? 'changes requested' : r.state}</Pill>
+              <span style={{ color: T.dim }}>{shortId(r.reviewer)}</span>
+              <span style={{ color: T.faint, fontSize: 10 }}>{ago(r.created_at)}</span>
+            </div>
+            {r.body && <div style={{ color: T.text, marginTop: 4, whiteSpace: 'pre-wrap' }}>{r.body}</div>}
+          </div>
+        ))}
+      {canReview && (
+        <div style={{ marginTop: 10 }}>
+          {error && <ErrorBox>{error}</ErrorBox>}
+          <textarea value={body} onChange={e => setBody(e.target.value)} placeholder="leave a review comment (optional)…" rows={2} style={{ ...input, resize: 'vertical' }} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button onClick={() => submit('approved')} disabled={!!busy} style={{ ...primaryBtn, opacity: busy ? 0.5 : 1 }}>{busy === 'approved' ? '[ · · · ]' : '[ approve ]'}</button>
+            <button onClick={() => submit('changes_requested')} disabled={!!busy}
+              style={{ background: T.redSoft, border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer', opacity: busy ? 0.5 : 1 }}>
+              {busy === 'changes_requested' ? '[ · · · ]' : 'request changes'}
+            </button>
+            <button onClick={() => submit('commented')} disabled={!!busy || !body.trim()} style={{ ...ghostBtn, padding: '5px 12px', fontSize: 11, opacity: (busy || !body.trim()) ? 0.5 : 1 }}>comment</button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** The conversation: the comment thread plus a composer. Persists across PR state. */
+function Conversation({ repo, number }: { repo: GitFactoryRepo; number: string }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [comments, setComments] = useState<GitFactoryPRComment[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    listGitFactoryPRComments(token, repo.id, number)
+      .then(list => { if (!cancelled) setComments(list ?? []); })
+      .catch(e => { if (!cancelled) setError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [token, repo.id, number, version]);
+
+  const add = async () => {
+    if (!body.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      await createGitFactoryPRComment(token, repo.id, number, body);
+      setBody(''); setVersion(v => v + 1);
+    } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); }
+  };
+
+  return (
+    <Section title={<>conversation{comments ? ` · ${comments.length}` : ''}</>}>
+      {error && <ErrorBox>{error}</ErrorBox>}
+      {!comments && !error && <Hint busy>→ loading comments · · ·</Hint>}
+      {comments && comments.length === 0 && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>no comments yet — start the conversation</div>}
+      {(comments ?? []).map(c => (
+        <div key={c.id} style={{ border: `1px solid ${T.border}`, marginBottom: 8, background: T.bgAlt }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 10.5 }}>
+            <span style={{ color: T.textHi, fontWeight: 600 }}>{shortId(c.author)}</span>
+            <span style={{ color: T.faint }}>{ago(c.created_at)}</span>
+          </div>
+          <div style={{ padding: '8px 9px', fontFamily: T.mono, fontSize: 11.5, color: T.text, whiteSpace: 'pre-wrap' }}>{c.body}</div>
+        </div>
+      ))}
+      <div style={{ marginTop: 10 }}>
+        <textarea value={body} onChange={e => setBody(e.target.value)} placeholder="add a comment…" rows={3} style={{ ...input, resize: 'vertical' }} />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+          <button onClick={add} disabled={busy || !body.trim()} style={{ ...primaryBtn, opacity: (busy || !body.trim()) ? 0.5 : 1 }}>{busy ? '[ · · · ]' : '[ comment ]'}</button>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 /** One pull request: metadata, merge state, review diff, and merge/close actions. */
 function PullDetail({ repo, number, onBack, onChanged }: {
   repo: GitFactoryRepo;
@@ -936,6 +1090,11 @@ function PullDetail({ repo, number, onBack, onChanged }: {
       {detail.diff !== undefined
         ? <DiffPanel files={detail.files} diff={detail.diff} />
         : <Hint>the review diff is shown while a pull request is open</Hint>}
+      {detail.status && <ChecksPanel status={detail.status} />}
+      {detail.reviews && (
+        <ReviewsPanel repo={repo} number={number} reviews={detail.reviews} canReview={open} onChanged={() => setVersion(v => v + 1)} />
+      )}
+      <Conversation repo={repo} number={number} />
     </div>
   );
 }
