@@ -95,7 +95,23 @@ func noProxyHosts() []string {
 	for _, r := range insecureRegistries() {
 		add(r)
 	}
+	// The git-factory a `git:` secret_ref hands the sandbox a clone URL for. A push
+	// or a PR-create reaches it over the pod network (a ClusterIP), never the
+	// internet, so — exactly like the artifact store and the base-image mirror above
+	// — routing it through the egress proxy fails on the proxy's private-address IP
+	// guard ("egress to non-public address blocked"). Naming it in NO_PROXY sends the
+	// git wire straight to the service. Empty (unset) keeps the old behaviour.
+	if gf := gitFactoryURL(); gf != "" {
+		add(gf)
+	}
 	return hosts
+}
+
+// gitFactoryURL is the in-cluster git-factory a sandbox pushes to and opens PRs
+// against, named in NO_PROXY so it bypasses the egress proxy (see noProxyHosts).
+// Derived from forge's OWN config (FORGE_GIT_FACTORY_URL), never a request.
+func gitFactoryURL() string {
+	return strings.TrimRight(envOrDefault("FORGE_GIT_FACTORY_URL", ""), "/")
 }
 
 // hostOnly strips a port (and any surrounding whitespace) from a "host[:port]" or

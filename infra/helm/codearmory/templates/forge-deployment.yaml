@@ -264,6 +264,14 @@ spec:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: git-internal-key
             {{- end }}
+            {{- if .Values.gitFactory.enabled }}
+            # The in-cluster git-factory a `git:` secret_ref hands a sandbox a clone
+            # URL for. Named here so forge lists it in the sandbox NO_PROXY (the egress
+            # proxy's IP guard blocks its ClusterIP otherwise), letting a run push and
+            # open a PR against it — see forge runtime.go noProxyHosts().
+            - name: FORGE_GIT_FACTORY_URL
+              value: "http://{{ include "codearmory.fullname" . }}-git-factory:{{ .Values.gitFactory.port }}"
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.forge.tls | nindent 12 }}
           {{- $tlsMounts := include "codearmory.tls.volumeMounts" .Values.forge.tls }}
           {{- if or (and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled) $tlsMounts }}

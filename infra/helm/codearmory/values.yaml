@@ -424,6 +424,11 @@ forge:
       # cannot go through the proxy. Set false to deny it: builds then fall back to the
       # origin registry, which still works but re-exposes them to its rate limits.
       allowRegistryMirror: true
+      # Allow sandboxes to reach the in-cluster git-factory directly (that pod, on its
+      # port only) so a run can push its work and open a dev PR. Same narrow shape and
+      # same reason it cannot go through the proxy; every operation is authenticated per
+      # user by the gatekeeper run-token the git: secret_ref mints. Set false to deny it.
+      allowGitFactory: true
   # Run sandbox jobs in hardware-isolated kata (Cloud Hypervisor) microVMs. When true:
   #   - forge runs RUNTIME=kata (env.k8sRuntimeClass MUST be set to the VM-isolating
   #     RuntimeClass, e.g. "kata", or the chart fails to render);
@@ -484,6 +489,10 @@ forge:
       # pulling from the origin registry, which still works but re-exposes them to that
       # registry's rate limits.
       allowRegistryMirror: true
+      # Allow sandboxes to reach the in-cluster git-factory (that pod, on its port only)
+      # so a run can push its work and open a dev PR. Per-user authenticated by the
+      # gatekeeper run-token the git: secret_ref mints. Set false to deny it.
+      allowGitFactory: true
   # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
   # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
   # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:
