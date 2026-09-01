@@ -30,7 +30,7 @@ import {
 import type {
   Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate, MapDef, DisplayNode,
 } from './pipelineGraph';
-import type { Step, WorkflowAction, GitRepo } from '../../api/bff';
+import type { Step, WorkflowAction, GitRepo, WorkflowLoopDef } from '../../api/bff';
 
 /** Node box geometry. Kept here (not in theme) because the edge maths depends on it.
  * The flow is top-down, so GAP_Y is the tall one: that is where the edges live. */
@@ -69,6 +69,9 @@ interface PipelineCanvasProps {
   initialRoutes?: Route[];
   /** The pipeline's map regions — see MapDef. */
   initialMaps?: MapDef[];
+  /** The pipeline's loops (with nesting via LoopDef.parent), so the canvas can draw
+   * an outer loop's box around its whole subtree and each inner loop as a nested box. */
+  initialLoops?: WorkflowLoopDef[];
   catalog: Record<string, Step>;
   editable?: boolean;
   palette?: Step[];
@@ -273,7 +276,7 @@ function conditionLabel(when: string): string {
 }
 
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
-  initialSteps, initialRoutes, initialMaps, catalog, editable = false, palette = [], actions = [],
+  initialSteps, initialRoutes, initialMaps, initialLoops, catalog, editable = false, palette = [], actions = [],
   onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, runStatus, activeNode,
 }: PipelineCanvasProps, ref) {
   const defName = useCallback((id: string) => catalog[id]?.name, [catalog]);
@@ -646,17 +649,37 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
    * map region. Drawn in BOTH views, because a loop's members (unlike a map's) are not
    * collapsed into a container node, so they sit at their own positions either way. */
   const loopBoxes = useMemo(() => {
-    const ids = [...new Set(blocks.map((b) => b.loopId).filter(Boolean))] as string[];
+    // A block carries its INNERMOST loop id. A block belongs to a loop's box when that
+    // loop is anywhere on the block's ancestor chain (loopId -> parent -> parent...),
+    // so an outer loop encloses its whole subtree — including the steps of the loops
+    // nested inside it — instead of only its own direct members. Without this the outer
+    // box was built from a member set that excluded the nested steps yet, as a bounding
+    // rect, swallowed them anyway, merging the two loops into one blob.
+    const parentOf = new Map<string, string | undefined>();
+    (initialLoops ?? []).forEach((l) => parentOf.set(l.id, l.parent));
+    const ancestors = (loopId?: string): string[] => {
+      const out: string[] = []; const seen = new Set<string>(); let id = loopId;
+      while (id && !seen.has(id)) { seen.add(id); out.push(id); id = parentOf.get(id); }
+      return out;
+    };
+    const depth = (id: string): number => {
+      let d = 0; const seen = new Set<string>(); let p = parentOf.get(id);
+      while (p && !seen.has(p)) { seen.add(p); d++; p = parentOf.get(p); }
+      return d;
+    };
+    const ids = [...new Set(blocks.flatMap((b) => ancestors(b.loopId)))];
     return ids.map((id) => {
-      const pts = blocks.filter((b) => b.loopId === id).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
+      const pts = blocks.filter((b) => ancestors(b.loopId).includes(id)).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
       if (pts.length === 0) return null;
-      const x = Math.min(...pts.map((p) => p.x)) - 12;
-      const y = Math.min(...pts.map((p) => p.y)) - 22;
-      const x2 = Math.max(...pts.map((p) => p.x)) + NODE_W + 12;
-      const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 12;
-      return { id, x, y, w: x2 - x, h: y2 - y };
-    }).filter(Boolean) as { id: string; x: number; y: number; w: number; h: number }[];
-  }, [blocks, posOf]);
+      // Inset nested boxes so a child reads as sitting inside its parent, not on top.
+      const pad = depth(id) * 5;
+      const x = Math.min(...pts.map((p) => p.x)) - 12 + pad;
+      const y = Math.min(...pts.map((p) => p.y)) - 22 + pad;
+      const x2 = Math.max(...pts.map((p) => p.x)) + NODE_W + 12 - pad;
+      const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 12 - pad;
+      return { id, x, y, w: x2 - x, h: y2 - y, depth: depth(id) };
+    }).filter(Boolean) as { id: string; x: number; y: number; w: number; h: number; depth: number }[];
+  }, [blocks, posOf, initialLoops]);
 
   const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
   const height = Math.max(lanes.bottom + PAD, 260);

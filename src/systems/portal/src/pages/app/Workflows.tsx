@@ -528,7 +528,7 @@ function PipelineBuilderOverlay({
       )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={routesSeed} initialMaps={mapsSeed}
+          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={routesSeed} initialMaps={mapsSeed} initialLoops={initial?.loops ?? []}
             catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
             onChange={onGraphChange} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
@@ -919,7 +919,7 @@ function PipelinesTab() {
                       draw one pipeline the same way. A pipeline with no stored
                       routes shows the edges derived from its ordered steps. */}
                   <div style={{ height: 300, marginBottom: 20 }}>
-                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} initialMaps={selectedWorkflow.maps ?? []} catalog={catalogMap} />
+                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} initialMaps={selectedWorkflow.maps ?? []} initialLoops={selectedWorkflow.loops ?? []} catalog={catalogMap} />
                   </div>
                 </>
               )}

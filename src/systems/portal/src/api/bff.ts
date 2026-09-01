@@ -400,6 +400,10 @@ export interface WorkflowLoopDef {
   until?: string;
   /** Optional: binds the 1-based iteration number for the body as ${loop.<var>}. */
   var?: string;
+  /** Optional: nests this loop inside the named loop (an inner loop's whole body is
+   * one step of the parent's body). Used by the canvas to draw the outer loop's box
+   * around its whole subtree and the inner loop as a distinct nested box. */
+  parent?: string;
 }
 
 /** A run parameter a pipeline declares. `default` is applied when the trigger omits
