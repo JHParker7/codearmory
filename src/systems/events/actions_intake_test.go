@@ -18,7 +18,7 @@ func TestInterpolate(t *testing.T) {
 		{"ref={{data.ref}} sha={{ data.commit }}", "ref=dev sha=9af3"},
 		{"{{ subject }}", "jhparker7/codearmory_git_factory"},
 		{"{{ actor.org_id }}", "org1"},
-		{"{{ data.missing }}", ""},          // unknown path renders empty, never errors
+		{"{{ data.missing }}", ""}, // unknown path renders empty, never errors
 		{"no templates here", "no templates here"},
 	}
 	for _, c := range cases {
@@ -39,10 +39,10 @@ func TestValidateEventDefaultsAndErrors(t *testing.T) {
 	}
 
 	bad := []Event{
-		{Source: "git", Subject: "a/b", Actor: Actor{UserID: "u"}},   // no type
-		{Type: "t", Subject: "a/b", Actor: Actor{UserID: "u"}},       // no source
-		{Type: "t", Source: "git", Actor: Actor{UserID: "u"}},        // no subject
-		{Type: "t", Source: "git", Subject: "a/b"},                   // no actor
+		{Source: "git", Subject: "a/b", Actor: Actor{UserID: "u"}}, // no type
+		{Type: "t", Subject: "a/b", Actor: Actor{UserID: "u"}},     // no source
+		{Type: "t", Source: "git", Actor: Actor{UserID: "u"}},      // no subject
+		{Type: "t", Source: "git", Subject: "a/b"},                 // no actor
 	}
 	for i, b := range bad {
 		if msg := validateEvent(&b); msg == "" {

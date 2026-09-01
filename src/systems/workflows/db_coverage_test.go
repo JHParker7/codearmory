@@ -231,7 +231,7 @@ func TestStepHandlers_Lifecycle(t *testing.T) {
 		t.Fatalf("create got %d, want 201: %s", w.Code, w.Body.String())
 	}
 	var created Step
-	json.Unmarshal(w.Body.Bytes(), &created) //nolint:errcheck
+	json.Unmarshal(w.Body.Bytes(), &created)                                                    //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM steps WHERE step_id = ?`, created.StepID) }) //nolint:errcheck
 
 	// Duplicate name → 409
@@ -294,7 +294,7 @@ func TestRunHandlers_TriggerListGet(t *testing.T) {
 	json.Unmarshal(cw.Body.Bytes(), &wf) //nolint:errcheck
 	t.Cleanup(func() {
 		connect().Exec(`DELETE FROM workflow_runs WHERE workflow_id = ?`, wf.WorkflowID) //nolint:errcheck
-		connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID)      //nolint:errcheck
+		connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID)     //nolint:errcheck
 	})
 
 	// Trigger a run.
@@ -358,7 +358,7 @@ func TestWorkflowHandlers_Lifecycle(t *testing.T) {
 		t.Fatalf("create workflow got %d, want 201: %s", w.Code, w.Body.String())
 	}
 	var wf Workflow
-	json.Unmarshal(w.Body.Bytes(), &wf) //nolint:errcheck
+	json.Unmarshal(w.Body.Bytes(), &wf)                                                                //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID) }) //nolint:errcheck
 
 	// List

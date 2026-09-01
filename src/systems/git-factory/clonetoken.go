@@ -34,7 +34,7 @@ type cloneTokenPayload struct {
 	E int64  `json:"e"` // expiry, unix seconds
 }
 
-func b64(b []byte) string  { return base64.RawURLEncoding.EncodeToString(b) }
+func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 func sign(msg string) []byte {
 	m := hmac.New(sha256.New, []byte(cloneTokenKey()))
 	m.Write([]byte(msg))

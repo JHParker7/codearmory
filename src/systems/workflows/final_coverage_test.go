@@ -32,7 +32,7 @@ func TestWorkflow_List(t *testing.T) {
 func TestWorkflowRun_UpdateRemove(t *testing.T) {
 	requireDB(t)
 	run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: "w1", TriggeredBy: "u", OrgID: "o", Status: "pending", CreatedAt: time.Now().UTC()}
-	run.Add(context.Background())                                                                //nolint:errcheck
+	run.Add(context.Background())                                                                 //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
 	run.Status = "running"
 	if err := run.Update(context.Background()); err != nil {
@@ -46,10 +46,10 @@ func TestWorkflowRun_UpdateRemove(t *testing.T) {
 func TestRecoverStuckRuns(t *testing.T) {
 	requireDB(t)
 	run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: "w1", TriggeredBy: "u", OrgID: "o", Status: "pending", CreatedAt: time.Now().UTC()}
-	run.Add(context.Background())                                                                //nolint:errcheck
+	run.Add(context.Background())                                                                 //nolint:errcheck
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)         //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
-	recoverStuckRuns() // wrapper around recoverStuckRunsDB; must not panic and should fail stuck runs
+	recoverStuckRuns()                                                                            // wrapper around recoverStuckRunsDB; must not panic and should fail stuck runs
 	got, _ := (WorkflowRun{RunID: run.RunID}).Get(context.Background())
 	if got.(WorkflowRun).Status != "failed" {
 		t.Errorf("stuck run status = %q, want failed", got.(WorkflowRun).Status)

@@ -79,8 +79,8 @@ type QuotaView struct {
 	// Default reports whether MaxBytes came from the service default rather than an
 	// override, so an admin can tell "never configured" from "deliberately set to
 	// the same value".
-	Default    bool  `json:"default"`
-	UsedBytes  int64 `json:"used_bytes"`
-	Artifacts  int64 `json:"artifacts"`
-	SetBy      string `json:"set_by,omitempty"`
+	Default   bool   `json:"default"`
+	UsedBytes int64  `json:"used_bytes"`
+	Artifacts int64  `json:"artifacts"`
+	SetBy     string `json:"set_by,omitempty"`
 }

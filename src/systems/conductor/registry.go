@@ -220,7 +220,6 @@ func parseParamNames(pattern string) []string {
 	return names
 }
 
-
 // lookupEndpointForService finds a matching endpoint restricted to a specific service.
 func lookupEndpointForService(method, path, service string) (endpointEntry, []string, bool) {
 	routingMu.RLock()

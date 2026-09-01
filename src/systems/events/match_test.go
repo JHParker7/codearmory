@@ -14,10 +14,10 @@ func sampleEvent() Event {
 		Subject: "jhparker7/codearmory_git_factory",
 		Actor:   Actor{OrgID: "org1", UserID: "u1"},
 		Data: map[string]any{
-			"ref":    "dev",
-			"commit": "9af3",
-			"pusher": "jhparker7",
-			"labels": []any{"ci", "backend"},
+			"ref":     "dev",
+			"commit":  "9af3",
+			"pusher":  "jhparker7",
+			"labels":  []any{"ci", "backend"},
 			"attempt": float64(3),
 		},
 	}

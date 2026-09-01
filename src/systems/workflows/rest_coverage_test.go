@@ -67,7 +67,7 @@ func TestCancelRun_DB(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
-	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)            //nolint:errcheck
+	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)         //nolint:errcheck
 
 	n, err := cancelRun(context.Background(), run.RunID)
 	if err != nil || n != 1 {
@@ -86,8 +86,8 @@ func TestCancelRun_DB(t *testing.T) {
 func TestWorkflowRun_SetCurrentStepAndToken(t *testing.T) {
 	requireDB(t)
 	run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: "w1", TriggeredBy: "u", OrgID: "o", Status: "running", CreatedAt: time.Now().UTC()}
-	run.Add(context.Background())                                                                    //nolint:errcheck
-	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) })     //nolint:errcheck
+	run.Add(context.Background())                                                                 //nolint:errcheck
+	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
 	run.SetCurrentStep(context.Background(), 3)
 	if err := run.UpdateToken(context.Background(), "newtok", "newsess"); err != nil {
 		t.Fatalf("UpdateToken: %v", err)
@@ -101,7 +101,7 @@ func TestWorkflowRun_SetCurrentStepAndToken(t *testing.T) {
 func TestWorkflow_UpdateRemove(t *testing.T) {
 	requireDB(t)
 	wf := Workflow{WorkflowID: uuid.New().String(), Name: "w", CreatedBy: "u", OrgID: "o", Active: true, StepRefs: []WorkflowStepRef{}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	wf.Add(context.Background())                                                                  //nolint:errcheck
+	wf.Add(context.Background())                                                                       //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID) }) //nolint:errcheck
 	wf.Name = "renamed"
 	if err := wf.Update(context.Background()); err != nil {
@@ -118,7 +118,7 @@ func TestWorkflow_UpdateRemove(t *testing.T) {
 func TestWorkflowStepRun_UpdateRemove(t *testing.T) {
 	requireDB(t)
 	sr := WorkflowStepRun{StepRunID: uuid.New().String(), RunID: "r1", StepIndex: 0, StepName: "s", Status: "pending"}
-	sr.Add(context.Background())                                                                            //nolint:errcheck
+	sr.Add(context.Background())                                                                               //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_step_runs WHERE step_run_id = ?`, sr.StepRunID) }) //nolint:errcheck
 	sr.Status = "running"
 	if err := sr.Update(context.Background()); err != nil {

@@ -345,7 +345,9 @@ func (a ServiceAccountModel) List(ctx context.Context, limit, offset int) ([]db,
 func (m ServiceRoleModel) Add(_ context.Context) error    { return errors.New("not implemented") }
 func (m ServiceRoleModel) Update(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceRoleModel) Remove(_ context.Context) error { return errors.New("not implemented") }
-func (m ServiceRoleModel) Get(_ context.Context) (db, error)    { return nil, errors.New("not implemented") }
+func (m ServiceRoleModel) Get(_ context.Context) (db, error) {
+	return nil, errors.New("not implemented")
+}
 func (m ServiceRoleModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
@@ -353,7 +355,9 @@ func (m ServiceRoleModel) List(_ context.Context, _, _ int) ([]db, error) {
 func (m ServiceEndpointModel) Add(_ context.Context) error    { return errors.New("not implemented") }
 func (m ServiceEndpointModel) Update(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceEndpointModel) Remove(_ context.Context) error { return errors.New("not implemented") }
-func (m ServiceEndpointModel) Get(_ context.Context) (db, error) { return nil, errors.New("not implemented") }
+func (m ServiceEndpointModel) Get(_ context.Context) (db, error) {
+	return nil, errors.New("not implemented")
+}
 func (m ServiceEndpointModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
@@ -361,15 +365,23 @@ func (m ServiceEndpointModel) List(_ context.Context, _, _ int) ([]db, error) {
 func (m ServiceActionModel) Add(_ context.Context) error    { return errors.New("not implemented") }
 func (m ServiceActionModel) Update(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceActionModel) Remove(_ context.Context) error { return errors.New("not implemented") }
-func (m ServiceActionModel) Get(_ context.Context) (db, error) { return nil, errors.New("not implemented") }
+func (m ServiceActionModel) Get(_ context.Context) (db, error) {
+	return nil, errors.New("not implemented")
+}
 func (m ServiceActionModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
 
 func (m ServiceDefaultGrantModel) Add(_ context.Context) error { return errors.New("not implemented") }
-func (m ServiceDefaultGrantModel) Update(_ context.Context) error    { return errors.New("not implemented") }
-func (m ServiceDefaultGrantModel) Remove(_ context.Context) error    { return errors.New("not implemented") }
-func (m ServiceDefaultGrantModel) Get(_ context.Context) (db, error) { return nil, errors.New("not implemented") }
+func (m ServiceDefaultGrantModel) Update(_ context.Context) error {
+	return errors.New("not implemented")
+}
+func (m ServiceDefaultGrantModel) Remove(_ context.Context) error {
+	return errors.New("not implemented")
+}
+func (m ServiceDefaultGrantModel) Get(_ context.Context) (db, error) {
+	return nil, errors.New("not implemented")
+}
 func (m ServiceDefaultGrantModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
