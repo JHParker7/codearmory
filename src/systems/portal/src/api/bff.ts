@@ -2251,3 +2251,51 @@ export async function fetchProjectLabels(token: string): Promise<string[]> {
   }
   return [...labels].sort();
 }
+
+// ── Blacksmith ──────────────────────────────────────────────────────────────
+// Blacksmith is a host-registered service; conductor reverse-proxies /blacksmith/*
+// to it, so these read/write the agent ROLE definitions a workflow picks by name
+// on the blacksmith/agent action. Shapes mirror internal/roles.Role.
+
+export interface BlacksmithGuard {
+  kind: 'allow_all' | 'deny_all' | 'no_tests' | 'only_ext' | 'only_basenames' | 'both';
+  exts?: string[];
+  names?: string[];
+  a?: BlacksmithGuard;
+  b?: BlacksmithGuard;
+}
+
+export interface BlacksmithRole {
+  name: string;
+  prompt: string;
+  class: string;
+  tools: string[];
+  guard: BlacksmithGuard | null;
+  ticket_kind: string;
+  check: string;
+  rewrite_whole: boolean;
+  attempt_timeout_secs: number;
+  respins: number;
+  own_check: boolean;
+  seed_known: boolean;
+  max_iterations: number;
+  temperature: number;
+  max_tokens: number;
+}
+
+export function listBlacksmithRoles(token: string) {
+  return req<BlacksmithRole[]>('GET', '/blacksmith/roles', token);
+}
+
+export function getBlacksmithRole(token: string, name: string) {
+  return req<BlacksmithRole>('GET', `/blacksmith/roles/${encodeURIComponent(name)}`, token);
+}
+
+/** Create or replace a role. The URL name is authoritative; the body carries the rest. */
+export function putBlacksmithRole(token: string, name: string, payload: BlacksmithRole) {
+  return req<BlacksmithRole>('PUT', `/blacksmith/roles/${encodeURIComponent(name)}`, token, payload);
+}
+
+export function deleteBlacksmithRole(token: string, name: string) {
+  return req<void>('DELETE', `/blacksmith/roles/${encodeURIComponent(name)}`, token);
+}

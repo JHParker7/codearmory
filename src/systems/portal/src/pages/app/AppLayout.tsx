@@ -33,6 +33,7 @@ const ROUTE_SERVICE: Record<string, string> = {
   git: 'git_connector',
   codearmory_git_factory: 'codearmory_git_factory',
   outposts: 'outpost-gateway',
+  'blacksmith-roles': 'blacksmith',
 };
 
 // Services with a first-class bundled page. Any OTHER registered service that
@@ -43,7 +44,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 const BUNDLED_SERVICES = new Set<string>([
   'forge', 'workflows', 'events', 'gatekeeper', 'builder',
   'tickets', 'git_connector', 'containers', 'outpost-gateway',
-  'codearmory_git_factory',
+  'codearmory_git_factory', 'blacksmith',
 ]);
 
 /**
@@ -375,6 +376,7 @@ export function AppLayout() {
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto', overflowX: 'hidden' }}>
           <NavSection title="tools" sidebarCollapsed={navCollapsed}>
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
+            <NavItem to="/app/blacksmith-roles" label="agent roles/" desc="Configure the coding-agent roles" service="blacksmith" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
             {/* The git host, under the name people came for. Its route stays the
                 registry name so existing links keep working. */}

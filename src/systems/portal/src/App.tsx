@@ -25,6 +25,7 @@ import { Outposts } from './pages/app/Outposts';
 import { ServiceFrame } from './pages/app/ServiceFrame';
 import { Audit } from './pages/app/Audit';
 import { Settings } from './pages/app/Settings';
+import { BlacksmithRoles } from './pages/app/BlacksmithRoles';
 import { T } from './theme';
 
 /** Full-screen terminal-styled loading splash shown while a route guard awaits an async check. */
@@ -145,6 +146,7 @@ export function App() {
             <Route path="builder" element={<Builder />} />
             <Route path="audit" element={<Audit />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="blacksmith-roles" element={<BlacksmithRoles />} />
             {/* Generic iframe host for any registered, non-bundled service that
                 advertises a ui_path (e.g. blueprints, chaos, argo). Static routes
                 above out-rank this dynamic segment, so bundled pages always win. */}
