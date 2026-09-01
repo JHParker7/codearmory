@@ -556,6 +556,11 @@ func (p *WorkerPool) skipSkippedRegions(ctx context.Context, g *workflowGraph, s
 		}
 	}
 	for _, l := range g.loops {
+		// A nested loop is expanded inside its parent's super-node, never at this
+		// level, so only a top-level loop's skip is decided here.
+		if outermostLoop(g.loops, l.def.ID) != l.def.ID {
+			continue
+		}
 		if g.regionSkipped(st, l.nodes) {
 			skip(l.nodes)
 		}

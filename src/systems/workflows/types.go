@@ -400,6 +400,15 @@ type LoopDef struct {
 	// Var, when set, binds the 1-based iteration number for the body to read as
 	// ${loop.<var>} (e.g. an "attempt N of M" line in a prompt). Optional.
 	Var string `json:"var,omitempty"`
+	// Parent, when set, NESTS this loop inside the named loop: this loop's whole
+	// body is one step of the parent's body, so the parent re-runs (and re-draws)
+	// the inner loop's convergence on every outer attempt. Empty is a top-level
+	// loop. The parent's step range must strictly contain this loop's, and the
+	// chain must be acyclic. This is how "re-roll the whole run on dev failure"
+	// (an outer loop) can still let the spec converge locally (an inner loop):
+	// spec/expected-red carry loop_id=<inner>, dev/green loop_id=<outer>, and
+	// <inner>.parent=<outer>.
+	Parent string `json:"parent,omitempty"`
 }
 
 // loopHardMax is the ceiling a loop's Limit is clamped to, no matter what a

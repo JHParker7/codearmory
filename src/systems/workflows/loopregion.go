@@ -59,6 +59,29 @@ func validateLoops(steps []WorkflowStep, defs []LoopDef, routes []WorkflowRoute)
 			return msg
 		}
 	}
+	// Parent (nesting) chain: a parent must be a declared loop, and the chain must be
+	// acyclic — otherwise the outer/inner relationship is undefined and loopsOf would
+	// have to guard against a spin. A dangling or cyclic parent is an authoring bug,
+	// so it is a 400 here, not a surprise at run time.
+	parentOf := make(map[string]string, len(defs))
+	for _, d := range defs {
+		parentOf[d.ID] = d.Parent
+	}
+	for _, d := range defs {
+		if d.Parent == "" {
+			continue
+		}
+		if !seen[d.Parent] {
+			return fmt.Sprintf("loop %q: parent %q names no declared loop", d.ID, d.Parent)
+		}
+		visited := map[string]bool{d.ID: true}
+		for id := d.Parent; id != ""; id = parentOf[id] {
+			if visited[id] {
+				return fmt.Sprintf("loop %q: parent chain is cyclic", d.ID)
+			}
+			visited[id] = true
+		}
+	}
 	members := map[string]int{}
 	for i, ws := range steps {
 		if ws.LoopID == "" {
@@ -90,7 +113,7 @@ func validateLoops(steps []WorkflowStep, defs []LoopDef, routes []WorkflowRoute)
 			return fmt.Sprintf("loop %q: no step declares loop_id %q", d.ID, d.ID)
 		}
 	}
-	return validateLoopBoundary(steps, routes)
+	return validateLoopBoundary(steps, defs, routes)
 }
 
 // validateLoopDef checks one loop's config: the limit against the hard max, and that
@@ -109,14 +132,35 @@ func validateLoopDef(d LoopDef) string {
 	return ""
 }
 
-// validateLoopBoundary rejects a route that crosses directly between loops or that
-// re-enters a loop mid-body — a loop is one super-node, so such an edge has no
-// meaning. Mirrors validateRegionBoundary.
-func validateLoopBoundary(steps []WorkflowStep, routes []WorkflowRoute) string {
+// validateLoopBoundary rejects a route that crosses directly between UNRELATED loops
+// (different outermost super-nodes) — a loop is one super-node, so such an edge has
+// no meaning. A route BETWEEN nested loops (or between an inner loop and a plain
+// sibling under the same outer loop, e.g. expected-red -> dev) is fine: it is an
+// internal edge of the shared outer super-node, resolved inside that loop's subGraph.
+// So the comparison is on the OUTERMOST loop, not the direct one. Mirrors
+// validateRegionBoundary.
+func validateLoopBoundary(steps []WorkflowStep, defs []LoopDef, routes []WorkflowRoute) string {
+	parent := make(map[string]string, len(defs))
+	declared := make(map[string]bool, len(defs))
+	for _, d := range defs {
+		parent[d.ID] = d.Parent
+		declared[d.ID] = true
+	}
+	outer := func(id string) string {
+		for seen := map[string]bool{}; declared[id] && !seen[id]; {
+			p := parent[id]
+			if !declared[p] {
+				break
+			}
+			seen[id] = true
+			id = p
+		}
+		return id
+	}
 	loopOf := map[string]string{}
 	for _, ws := range steps {
 		if ws.LoopID != "" {
-			loopOf[ws.Name] = ws.LoopID
+			loopOf[ws.Name] = outer(ws.LoopID)
 		}
 	}
 	for _, r := range routes {
@@ -128,17 +172,30 @@ func validateLoopBoundary(steps []WorkflowStep, routes []WorkflowRoute) string {
 	return ""
 }
 
-// loopsOf groups a workflow's steps into loops, keyed by LoopID. Mirrors regionsOf.
+// loopsOf groups a workflow's steps into loops, keyed by LoopID. A NESTED loop's
+// steps belong to it AND to every ancestor loop (walking LoopDef.Parent), so an
+// outer loop's node set — and thus the subGraph its super-node runs — contains the
+// inner loop's steps. Mirrors regionsOf. Ancestry is followed only through loops
+// declared here, so a dangling parent is simply a top-level loop; a `seen` guard
+// keeps a cyclic parent chain (rejected at validation) from spinning here.
 func loopsOf(steps []WorkflowStep, defs []LoopDef) map[string]*loopRegion {
 	byID := make(map[string]*loopRegion, len(defs))
+	parent := make(map[string]string, len(defs))
 	for _, d := range defs {
 		byID[d.ID] = &loopRegion{def: d}
+		parent[d.ID] = d.Parent
 	}
 	for i, ws := range steps {
 		if ws.LoopID == "" {
 			continue
 		}
-		if l, ok := byID[ws.LoopID]; ok {
+		seen := map[string]bool{}
+		for id := ws.LoopID; id != "" && !seen[id]; id = parent[id] {
+			seen[id] = true
+			l, ok := byID[id]
+			if !ok {
+				break
+			}
 			if len(l.nodes) == 0 {
 				l.firstIndex = i
 			}
@@ -153,15 +210,56 @@ func loopsOf(steps []WorkflowStep, defs []LoopDef) map[string]*loopRegion {
 	return byID
 }
 
-// loopOfNode maps each step name to the loop it belongs to, or "" for none.
+// outermostLoop walks LoopDef.Parent up through the loops PRESENT in the set and
+// returns the topmost one — the super-node the scheduler expands. In the full graph
+// a nested node resolves to the outer loop (so the whole nest schedules as one
+// unit); inside the outer loop's subGraph, where the outer loop is absent, the same
+// node resolves to the inner loop, which is exactly how nesting recurses.
+func outermostLoop(loops map[string]*loopRegion, id string) string {
+	for seen := map[string]bool{}; ; {
+		l := loops[id]
+		if l == nil || l.def.Parent == "" || loops[l.def.Parent] == nil || seen[id] {
+			return id
+		}
+		seen[id] = true
+		id = l.def.Parent
+	}
+}
+
+// loopOfNode maps each step name to the OUTERMOST loop it belongs to, or "" for none.
 func loopOfNode(loops map[string]*loopRegion) map[string]string {
 	m := map[string]string{}
 	for id, l := range loops {
+		om := outermostLoop(loops, id)
 		for _, n := range l.nodes {
-			m[n] = id
+			m[n] = om
 		}
 	}
 	return m
+}
+
+// descendantLoopDefs returns the defs of the loops nested (transitively) inside
+// parentID, so the parent loop's super-node can carry them into its subGraph and
+// expand each inner loop as it iterates. Without this an inner loop's steps would
+// run once, ungrouped, inside every outer attempt instead of converging on their own.
+func descendantLoopDefs(g *workflowGraph, parentID string) []LoopDef {
+	var out []LoopDef
+	for _, l := range g.loops {
+		seen := map[string]bool{}
+		for id := l.def.Parent; id != "" && !seen[id]; {
+			seen[id] = true
+			if id == parentID {
+				out = append(out, l.def)
+				break
+			}
+			pl := g.loops[id]
+			if pl == nil {
+				break
+			}
+			id = pl.def.Parent
+		}
+	}
+	return out
 }
 
 // loopIterName labels an iteration's step run so the run view groups a loop's
@@ -211,6 +309,13 @@ func (p *WorkerPool) runLoopRegion(
 	}
 
 	sub := g.subGraph(loop.nodes)
+	// Carry any loops NESTED inside this one into the body graph, so each outer
+	// attempt expands the inner loop (letting it converge) rather than running the
+	// inner steps once, ungrouped. With no nested loops this is a no-op and the body
+	// is a plain sequence, exactly as before.
+	if kids := descendantLoopDefs(g, loop.def.ID); len(kids) > 0 {
+		sub = sub.withLoops(kids)
+	}
 	known := g.stepNames()
 
 	var last map[string]string

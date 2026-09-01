@@ -89,6 +89,77 @@ func TestLoopsOfGroupsNodes(t *testing.T) {
 	}
 }
 
+// A nested loop's steps belong to it AND to every ancestor, so the outer loop's node
+// set is the whole subtree and every nested node schedules under the OUTERMOST loop.
+func TestLoopsOfNested(t *testing.T) {
+	defs := []LoopDef{
+		{ID: "inner", Limit: 3, Parent: "outer"},
+		{ID: "outer", Limit: 3},
+	}
+	steps := []WorkflowStep{
+		{Step: Step{Name: "arch", Action: "noop"}},
+		loopStep("spec", "inner"),
+		loopStep("red", "inner"),
+		loopStep("dev", "outer"),
+		loopStep("green", "outer"),
+	}
+	loops := loopsOf(steps, defs)
+	if in := loops["inner"]; in == nil || len(in.nodes) != 2 || in.nodes[0] != "spec" || in.nodes[1] != "red" {
+		t.Fatalf("inner nodes = %+v, want [spec red]", loops["inner"])
+	}
+	out := loops["outer"]
+	want := []string{"spec", "red", "dev", "green"}
+	if out == nil || len(out.nodes) != len(want) {
+		t.Fatalf("outer nodes = %+v, want %v", out, want)
+	}
+	for i, n := range want {
+		if out.nodes[i] != n {
+			t.Fatalf("outer nodes = %v, want %v", out.nodes, want)
+		}
+	}
+	if out.firstIndex != 1 {
+		t.Errorf("outer firstIndex = %d, want 1 (spec)", out.firstIndex)
+	}
+	lof := loopOfNode(loops)
+	for _, n := range want {
+		if lof[n] != "outer" {
+			t.Errorf("loopOf[%s] = %q, want outer (outermost)", n, lof[n])
+		}
+	}
+	g := &workflowGraph{loops: loops}
+	kids := descendantLoopDefs(g, "outer")
+	if len(kids) != 1 || kids[0].ID != "inner" {
+		t.Errorf("descendantLoopDefs(outer) = %v, want [inner]", kids)
+	}
+	if k := descendantLoopDefs(g, "inner"); len(k) != 0 {
+		t.Errorf("inner has no descendants, got %v", k)
+	}
+}
+
+// Nesting validation: a well-formed nest passes (including the derived inner->outer
+// edge red->dev, which is internal to the shared outer super-node); a dangling or
+// cyclic parent is rejected.
+func TestValidateLoopsNesting(t *testing.T) {
+	steps := []WorkflowStep{
+		loopStep("spec", "inner"), loopStep("red", "inner"),
+		loopStep("dev", "outer"), loopStep("green", "outer"),
+	}
+	routes := []WorkflowRoute{{From: "spec", To: "red"}, {From: "red", To: "dev"}, {From: "dev", To: "green"}}
+
+	good := []LoopDef{{ID: "inner", Limit: 3, Parent: "outer"}, {ID: "outer", Limit: 3}}
+	if msg := validateLoops(steps, good, routes); msg != "" {
+		t.Errorf("valid nesting rejected: %s", msg)
+	}
+	bad := []LoopDef{{ID: "inner", Limit: 3, Parent: "ghost"}, {ID: "outer", Limit: 3}}
+	if msg := validateLoops(steps, bad, routes); !strings.Contains(msg, "names no declared loop") {
+		t.Errorf("dangling parent: got %q", msg)
+	}
+	cyc := []LoopDef{{ID: "inner", Limit: 3, Parent: "outer"}, {ID: "outer", Limit: 3, Parent: "inner"}}
+	if msg := validateLoops(steps, cyc, routes); !strings.Contains(msg, "cyclic") {
+		t.Errorf("cyclic parent: got %q", msg)
+	}
+}
+
 // A loop's exit condition must type-check against the same env route conditions use,
 // so a compiled loop is safe to reach the scheduler.
 func TestLoopUntilCompiles(t *testing.T) {
