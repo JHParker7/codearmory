@@ -1914,6 +1914,18 @@
         "resource": "codearmory_git_factory/repos"
       },
       {
+        "method": "GET",
+        "path": "/repos/{id}/pulls/{number}/reviews",
+        "action": "listReview",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/reviews",
+        "action": "createReview",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
         "method": "POST",
         "path": "/repos/{id}/statuses/{sha}",
         "action": "createStatus",
@@ -1980,6 +1992,8 @@
           "createPullComment",
           "updatePullComment",
           "deletePullComment",
+          "listReview",
+          "createReview",
           "listStatus",
           "createStatus",
           "listProtection",

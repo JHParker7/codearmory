@@ -35,12 +35,17 @@ import (
 // depend on the control plane being reachable.
 
 type BranchProtection struct {
-	RepoID    string    `gorm:"primaryKey" json:"repo_id"`
-	Pattern   string    `gorm:"primaryKey" json:"pattern"` // branch name or glob, e.g. "main" or "release/*"
-	NoForce   bool      `json:"block_force_push"`
-	NoDelete  bool      `json:"block_deletion"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	RepoID   string `gorm:"primaryKey" json:"repo_id"`
+	Pattern  string `gorm:"primaryKey" json:"pattern"` // branch name or glob, e.g. "main" or "release/*"
+	NoForce  bool   `json:"block_force_push"`
+	NoDelete bool   `json:"block_deletion"`
+	// RequireReview gates the MERGE api (not the push hook — a merge is the only write
+	// that lands on a protected branch through a review): a PR into a matching branch
+	// needs an approving review and no outstanding changes-requested. Off by default,
+	// so an existing repo's merges are unchanged until it is turned on.
+	RequireReview bool      `json:"require_review"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // preReceiveHook enforces the rules file. Kept deliberately small and dependency-free.
@@ -147,9 +152,10 @@ func handleSetProtection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Pattern  string `json:"pattern"`
-		NoForce  *bool  `json:"block_force_push"`
-		NoDelete *bool  `json:"block_deletion"`
+		Pattern       string `json:"pattern"`
+		NoForce       *bool  `json:"block_force_push"`
+		NoDelete      *bool  `json:"block_deletion"`
+		RequireReview *bool  `json:"require_review"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -164,13 +170,14 @@ func handleSetProtection(w http.ResponseWriter, r *http.Request) {
 	}
 	rule := BranchProtection{
 		RepoID: re.ID, Pattern: req.Pattern,
-		NoForce:   req.NoForce == nil || *req.NoForce, // protecting means blocking force by default
-		NoDelete:  req.NoDelete == nil || *req.NoDelete,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		NoForce:       req.NoForce == nil || *req.NoForce, // protecting means blocking force by default
+		NoDelete:      req.NoDelete == nil || *req.NoDelete,
+		RequireReview: req.RequireReview != nil && *req.RequireReview, // off unless asked
+		CreatedAt:     time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := connect().WithContext(ctx).
 		Where("repo_id = ? AND pattern = ?", re.ID, req.Pattern).
-		Assign(map[string]any{"no_force": rule.NoForce, "no_delete": rule.NoDelete, "updated_at": rule.UpdatedAt}).
+		Assign(map[string]any{"no_force": rule.NoForce, "no_delete": rule.NoDelete, "require_review": rule.RequireReview, "updated_at": rule.UpdatedAt}).
 		FirstOrCreate(&rule).Error; err != nil {
 		slog.ErrorContext(ctx, "set protection", "Repo_id", re.ID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)

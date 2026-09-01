@@ -159,6 +159,8 @@ func everyRecordRoute() []recordRoute {
 		{name: "createPullComment", handler: handleCreatePRComment, method: http.MethodPost, suffix: "/pulls/1/comments", body: `{"body":"x"}`, extra: map[string]string{"number": "1"}},
 		{name: "updatePullComment", handler: handleUpdatePRComment, method: http.MethodPatch, suffix: "/pulls/1/comments/c1", body: `{"body":"y"}`, extra: map[string]string{"number": "1", "commentID": "c1"}},
 		{name: "deletePullComment", handler: handleDeletePRComment, method: http.MethodDelete, suffix: "/pulls/1/comments/c1", extra: map[string]string{"number": "1", "commentID": "c1"}},
+		{name: "listReviews", handler: handleListReviews, method: http.MethodGet, suffix: "/pulls/1/reviews", extra: map[string]string{"number": "1"}},
+		{name: "submitReview", handler: handleSubmitReview, method: http.MethodPost, suffix: "/pulls/1/reviews", body: `{"state":"approved"}`, extra: map[string]string{"number": "1"}},
 		{name: "postStatus", handler: handlePostStatus, method: http.MethodPost, suffix: "/statuses/abc1234", body: `{"context":"ci","state":"success"}`, extra: map[string]string{"sha": "abc1234"}},
 		{name: "listStatuses", handler: handleListStatuses, method: http.MethodGet, suffix: "/commits/abc1234/statuses", extra: map[string]string{"sha": "abc1234"}},
 		{name: "combinedStatus", handler: handleCombinedStatus, method: http.MethodGet, suffix: "/commits/abc1234/status", extra: map[string]string{"sha": "abc1234"}},

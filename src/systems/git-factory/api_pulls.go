@@ -182,6 +182,14 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 			statuses := loadStatuses(ctx, re.ID, sha)
 			out["status"] = map[string]any{"sha": sha, "state": combinedState(statuses), "statuses": statuses}
 		}
+		// The review verdict and whether this PR's target gates merge on it, so a
+		// caller knows both where the review stands and whether it is binding.
+		reviews := loadReviews(ctx, re.ID, pr.ID)
+		out["reviews"] = map[string]any{
+			"decision": decideReviews(reviews, pr.Author),
+			"required": reviewRequiredFor(ctx, re.ID, pr.TargetRef),
+			"reviews":  reviews,
+		}
 	}
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, out)
@@ -206,6 +214,20 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	if pr.State != prOpen {
 		http.Error(w, "pull request is "+pr.State, http.StatusConflict)
 		return
+	}
+	// A protected target branch gates the merge on review: an approval from someone
+	// other than the author, and nobody currently requesting changes. Off unless the
+	// branch's protection turns it on, so unprotected repos merge exactly as before.
+	if reviewRequiredFor(ctx, re.ID, pr.TargetRef) {
+		d := decideReviews(loadReviews(ctx, re.ID, pr.ID), pr.Author)
+		if d.ChangesRequested {
+			http.Error(w, "changes have been requested; resolve the review before merging", http.StatusConflict)
+			return
+		}
+		if d.Approvals < 1 {
+			http.Error(w, "the target branch requires an approving review before merge", http.StatusConflict)
+			return
+		}
 	}
 
 	var req struct {
