@@ -178,7 +178,7 @@ func main() {
 	// only copy of pushed source (ARCHITECTURE §5).
 	verifyStorage()
 
-	if err := connect().AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &RepoShare{}, &PullRequest{}, &BranchProtection{}, &MaintenanceLease{}); err != nil {
+	if err := connect().AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &RepoShare{}, &PullRequest{}, &PRComment{}, &BranchProtection{}, &MaintenanceLease{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
@@ -241,6 +241,10 @@ func main() {
 	mux.HandleFunc("GET /repos/{id}/pulls/{number}", handleGetPull)
 	mux.HandleFunc("POST /repos/{id}/pulls/{number}/merge", handleMergePull)
 	mux.HandleFunc("POST /repos/{id}/pulls/{number}/close", handleClosePull)
+	mux.HandleFunc("GET /repos/{id}/pulls/{number}/comments", handleListPRComments)
+	mux.HandleFunc("POST /repos/{id}/pulls/{number}/comments", handleCreatePRComment)
+	mux.HandleFunc("PATCH /repos/{id}/pulls/{number}/comments/{commentID}", handleUpdatePRComment)
+	mux.HandleFunc("DELETE /repos/{id}/pulls/{number}/comments/{commentID}", handleDeletePRComment)
 	mux.HandleFunc("GET /repos/{id}/collaborators", handleListCollaborators)
 	mux.HandleFunc("PUT /repos/{id}/collaborators", handleAddCollaborator)
 	mux.HandleFunc("DELETE /repos/{id}/collaborators/{user}", handleRemoveCollaborator)

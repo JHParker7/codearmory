@@ -1891,6 +1891,30 @@
       },
       {
         "method": "GET",
+        "path": "/repos/{id}/pulls/{number}/comments",
+        "action": "listPullComment",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/comments",
+        "action": "createPullComment",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "PATCH",
+        "path": "/repos/{id}/pulls/{number}/comments/{commentID}",
+        "action": "updatePullComment",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}/pulls/{number}/comments/{commentID}",
+        "action": "deletePullComment",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
         "path": "/repos/{id}/protections",
         "action": "listProtection",
         "resource": "codearmory_git_factory/repos"
@@ -1934,6 +1958,10 @@
           "getPull",
           "mergePull",
           "updatePull",
+          "listPullComment",
+          "createPullComment",
+          "updatePullComment",
+          "deletePullComment",
           "listProtection",
           "setProtection"
         ],
