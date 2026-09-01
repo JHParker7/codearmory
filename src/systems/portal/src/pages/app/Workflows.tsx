@@ -114,6 +114,7 @@ function PipelineBuilderOverlay({
           matrix: s.matrix ?? null,
           scatter: s.scatter ?? null,
           map_id: s.map_id || undefined,
+          loop_id: s.loop_id || undefined,
         };
       }
       // The GET returns the effective (merged) name/with; recover the raw overrides
@@ -138,6 +139,9 @@ function PipelineBuilderOverlay({
         // Map membership is part of the pipeline's shape, not the step definition —
         // dropping it here would silently dissolve the region on the next save.
         map_id: s.map_id || undefined,
+        // Loop membership, same reason — and without it the loop enclosure/badge never
+        // draw because the blocks would carry no loopId.
+        loop_id: s.loop_id || undefined,
       };
     }) : [],
     [initial, catalog],
@@ -784,6 +788,7 @@ function PipelinesTab() {
         scatter: s.scatter ?? null,
         approval: s.approval ?? null,
         map_id: s.map_id || undefined,
+        loop_id: s.loop_id || undefined,
       };
     }) : [],
     [selectedWorkflow],
