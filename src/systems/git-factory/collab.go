@@ -40,8 +40,8 @@ type RepoShare struct {
 // clone; write adds pushing. Managing collaborators is NOT included at any level —
 // re-sharing someone else's repo stays with the owner.
 var shareActions = map[string][]string{
-	"read":  {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "listPull", "getPull", "createPull", "listPullComment", "createPullComment"},
-	"write": {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "writeRepo", "updateRepo", "setDefaultBranch", "listPull", "getPull", "createPull", "mergePull", "updatePull", "listPullComment", "createPullComment", "updatePullComment", "deletePullComment"},
+	"read":  {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "listPull", "getPull", "createPull", "listPullComment", "createPullComment", "listStatus"},
+	"write": {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "writeRepo", "updateRepo", "setDefaultBranch", "listPull", "getPull", "createPull", "mergePull", "updatePull", "listPullComment", "createPullComment", "updatePullComment", "deletePullComment", "listStatus", "createStatus"},
 }
 
 func validShareLevel(l string) bool { _, ok := shareActions[l]; return ok }

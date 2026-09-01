@@ -1156,3 +1156,19 @@ func branchExists(ctx context.Context, repoID, branch string) bool {
 	}
 	return exec.CommandContext(ctx, gitBinary, "-C", dir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil
 }
+
+// branchTip resolves a branch to its tip commit SHA, so a commit status can be keyed
+// to the head of a PR's source. Returns ("", false) if the branch does not exist.
+func branchTip(ctx context.Context, repoID, branch string) (string, bool) {
+	dir, err := localDirFor(ctx, repoID)
+	if err != nil || !branchNameRe.MatchString(branch) {
+		return "", false
+	}
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	cmd.Stdout = &buf
+	if cmd.Run() != nil {
+		return "", false
+	}
+	return strings.TrimSpace(buf.String()), true
+}

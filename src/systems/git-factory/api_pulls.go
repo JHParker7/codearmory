@@ -175,6 +175,13 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 			res = mergeResult{Mergeable: false, Reason: err.Error()}
 		}
 		out["merge"] = res
+		// The checks a workflow (or any CI) reported on this PR's head commit, so a
+		// reviewer sees green/red without leaving the PR. Combined worst-first; "" means
+		// nothing has reported yet.
+		if sha, ok := branchTip(ctx, re.ID, pr.SourceRef); ok {
+			statuses := loadStatuses(ctx, re.ID, sha)
+			out["status"] = map[string]any{"sha": sha, "state": combinedState(statuses), "statuses": statuses}
+		}
 	}
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, out)
