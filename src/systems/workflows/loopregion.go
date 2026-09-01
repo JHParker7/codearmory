@@ -263,9 +263,16 @@ func descendantLoopDefs(g *workflowGraph, parentID string) []LoopDef {
 }
 
 // loopIterName labels an iteration's step run so the run view groups a loop's
-// attempts the way it groups a matrix's or a map's legs.
-func loopIterName(base string, attempt int) string {
-	return fmt.Sprintf("%s [attempt=%d]", base, attempt)
+// attempts the way it groups a matrix's or a map's legs. It keys on the loop's var
+// name when it has one (else "attempt"), so a NESTED step composes to a label like
+// "spec [draw=1] [specattempt=2]" — the two loop dimensions are distinguishable and
+// separately selectable, instead of colliding on a bare "[attempt=N]" from each.
+func loopIterName(base, varName string, attempt int) string {
+	key := varName
+	if key == "" {
+		key = "attempt"
+	}
+	return fmt.Sprintf("%s [%s=%d]", base, key, attempt)
 }
 
 // loopVars binds the iteration number for the body, when the loop named a var.
@@ -274,6 +281,27 @@ func loopVars(varName, attempt string) map[string]string {
 		return nil
 	}
 	return map[string]string{varName: attempt}
+}
+
+// mergeVars overlays b onto a (b wins on a clash), for composing an OUTER loop's
+// iteration vars with a nested INNER loop's — so a nested body can read both
+// ${loop.<outer>} and ${loop.<inner>}. Returns the other map untouched when one is
+// empty (the top-level no-op keeps ordinary runs allocation-free).
+func mergeVars(a, b map[string]string) map[string]string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	m := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		m[k] = v
+	}
+	for k, v := range b {
+		m[k] = v
+	}
+	return m
 }
 
 // runLoopRegion runs a loop's body repeatedly until its exit condition holds or its
@@ -290,7 +318,7 @@ func loopVars(varName, attempt string) map[string]string {
 //     a pass genuinely broke.
 func (p *WorkerPool) runLoopRegion(
 	ctx context.Context, store *tokenStore, runID, workflowID string, g *workflowGraph, loop *loopRegion,
-	inputs, visible map[string]string, depth int, legSem chan struct{},
+	inputs, visible map[string]string, depth int, pic iterCtx, legSem chan struct{},
 ) (map[string]string, string, int) {
 	// Clamp again at run time: validation rejects a static over-limit, but this is the
 	// last line of defence for anything that reaches here — the limit can never spin a
@@ -340,8 +368,11 @@ func (p *WorkerPool) runLoopRegion(
 		st := newRunState(sub, cloneOutputs(visible), nil)
 		attempt := i + 1
 		iterStatus := p.runGraph(ctx, sub, st, store, runID, workflowID, inputs, depth, iterCtx{
-			mapVars: loopVars(loop.def.Var, strconv.Itoa(attempt)),
-			label:   func(base string) string { return loopIterName(base, attempt) },
+			// Compose with the parent iteration (the OUTER loop) so a nested body sees
+			// both loops' vars and every step run is labelled by the WHOLE nest —
+			// pic.name applies the outer label first, this loop's wraps it.
+			mapVars: mergeVars(pic.mapVars, loopVars(loop.def.Var, strconv.Itoa(attempt))),
+			label:   func(base string) string { return loopIterName(pic.name(base), loop.def.Var, attempt) },
 			inbound: visible,
 			known:   known,
 		}, legSem)

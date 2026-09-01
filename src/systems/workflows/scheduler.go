@@ -453,7 +453,10 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				visible := ic.withInbound(g.visibleForRegion(loop.nodes, st.outputs))
 				inFlight++
 				go func(loop *loopRegion, visible map[string]string) {
-					agg, status, iters := p.runLoopRegion(ctx, store, runID, workflowID, g, loop, inputs, visible, depth, legSem)
+					// Pass the current iteration context so a loop nested inside this
+					// graph (itself a loop/map body) composes its labels and vars onto the
+					// outer iteration's — see runLoopRegion. Empty ic at the top level.
+					agg, status, iters := p.runLoopRegion(ctx, store, runID, workflowID, g, loop, inputs, visible, depth, ic, legSem)
 					resCh <- nodeResult{loop: loop, state: statusToNodeState(status), regionOutputs: agg, legs: iters}
 				}(loop, visible)
 			}

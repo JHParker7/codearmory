@@ -167,3 +167,25 @@ func TestLoopUntilCompiles(t *testing.T) {
 		t.Fatalf("valid until failed to compile: %v", err)
 	}
 }
+
+
+// A nested loop composes its label onto the parent iteration's, keyed by each loop's
+// var, so the two loop dimensions are distinct and separately selectable in the run
+// view (rather than colliding on a bare inner "[attempt=N]").
+func TestLoopIterNameComposes(t *testing.T) {
+	outer := loopIterName("spec", "draw", 1)
+	if outer != "spec [draw=1]" {
+		t.Fatalf("outer label = %q, want %q", outer, "spec [draw=1]")
+	}
+	inner := loopIterName(outer, "specattempt", 2)
+	if inner != "spec [draw=1] [specattempt=2]" {
+		t.Fatalf("composed label = %q, want %q", inner, "spec [draw=1] [specattempt=2]")
+	}
+	if got := loopIterName("dev", "", 3); got != "dev [attempt=3]" {
+		t.Errorf("no-var label = %q, want %q", got, "dev [attempt=3]")
+	}
+	m := mergeVars(map[string]string{"draw": "1"}, map[string]string{"specattempt": "2"})
+	if m["draw"] != "1" || m["specattempt"] != "2" {
+		t.Errorf("mergeVars = %v, want both keys", m)
+	}
+}
