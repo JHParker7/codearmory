@@ -276,9 +276,17 @@ func (g *workflowGraph) subGraph(nodes []string) *workflowGraph {
 		}
 	}
 	sub := newGraph(steps, routes)
-	// Keep the workflow-level step indices: an iteration's step runs must still name
-	// the step they came from, not a position within the region.
-	sub.outerIndex = g.index
+	// Keep the WORKFLOW-level step indices through ARBITRARY nesting: an iteration's
+	// step runs must still name the step they came from, not a position within the
+	// region. Use g's REPORTED index (g.stepIndex resolves g.outerIndex when g is
+	// itself a sub, else g.index) — plain g.index would, for a loop nested inside a
+	// loop, report the inner loop's steps at their position within the PARENT sub-graph
+	// (e.g. spec at 1 instead of 4), so the run view maps them to the wrong step: the
+	// inner-loop step shows pending while its run is attributed to some other node.
+	sub.outerIndex = make(map[string]int, len(steps))
+	for _, ws := range steps {
+		sub.outerIndex[ws.Name] = g.stepIndex(ws.Name)
+	}
 	return sub
 }
 
