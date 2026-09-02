@@ -977,7 +977,7 @@ function Conversation({ repo, number }: { repo: GitFactoryRepo; number: string }
             <span style={{ color: T.textHi, fontWeight: 600 }}>{shortId(c.author)}</span>
             <span style={{ color: T.faint }}>{ago(c.created_at)}</span>
           </div>
-          <div style={{ padding: '8px 9px', fontFamily: T.mono, fontSize: 11.5, color: T.text, whiteSpace: 'pre-wrap' }}>{c.body}</div>
+          <div style={{ padding: '2px 11px 6px' }}><Markdown source={c.body} /></div>
         </div>
       ))}
       <div style={{ marginTop: 10 }}>

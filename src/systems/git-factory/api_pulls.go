@@ -112,6 +112,10 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.InfoContext(ctx, "pull request opened", "Repo_id", re.ID, "number", pr.Number, "author", userID)
+	// Announce the open so a trigger can run CI or a review on it. Detached (a slow
+	// events service must not hold the request), tenant = repo owner (notifyPullRequest).
+	head, _ := branchTip(ctx, re.ID, pr.SourceRef)
+	notifyPullRequest(ctx, re, "opened", pr, head)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusCreated, pr)
 }
@@ -263,6 +267,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = touchRepo(ctx, re.ID)
 	notifyPush(ctx, re, userID, []string{pr.TargetRef}, before)
+	notifyPullRequest(ctx, re, "merged", pr, sha)
 	slog.InfoContext(ctx, "pull request merged", "Repo_id", re.ID, "number", pr.Number, "commit", sha)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, pr)
@@ -292,6 +297,7 @@ func handleClosePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pr.State = prClosed
+	notifyPullRequest(ctx, re, "closed", pr, "")
 	writeJSON(w, http.StatusOK, pr)
 }
 

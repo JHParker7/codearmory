@@ -116,6 +116,48 @@ func notifyPush(ctx context.Context, re Repo, pusher string, refs []string, befo
 	go emitEvent(emitCtx, ev, re.ID)
 }
 
+// pullRequestEvent is the type prefix for a PR lifecycle event; the action
+// (opened|closed|merged) completes it — `repo.pull_request.opened`, the same shape
+// the events service already understands from its Gitea/GitHub webhook adapters, so
+// a trigger can run a pipeline (CI, review) from a native git-factory PR.
+const pullRequestEvent = "repo.pull_request."
+
+// notifyPullRequest emits a PR lifecycle event. head is the source ref's tip commit
+// (the checks run on it); it may be empty if the branch could not be resolved. The
+// tenant is the repo OWNER, not the actor — a trigger belongs to whoever owns the
+// repo, exactly as notifyPush reasons.
+func notifyPullRequest(ctx context.Context, re Repo, action string, pr PullRequest, head string) {
+	if !eventsEnabled() {
+		return
+	}
+	fields := map[string]any{
+		"repo_id":    re.ID,
+		"repo":       re.Namespace + "/" + re.Name,
+		"namespace":  re.Namespace,
+		"name":       re.Name,
+		"clone_url":  re.HttpUrl,
+		"number":     strconv.Itoa(pr.Number),
+		"title":      pr.Title,
+		"author":     pr.Author,
+		"ref":        pr.SourceRef, // the source branch — what a review/CI checks out
+		"target_ref": pr.TargetRef,
+		"state":      pr.State,
+		"action":     action,
+	}
+	if head != "" {
+		fields["sha"] = head
+	}
+	ev := sdkevents.Event{
+		Type:    pullRequestEvent + action,
+		Source:  gitEventSource,
+		Subject: re.Namespace + "/" + re.Name,
+		Actor:   sdkevents.Actor{UserID: re.Owner},
+		Data:    fields,
+	}
+	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	go emitEvent(emitCtx, ev, re.ID)
+}
+
 func emitEvent(ctx context.Context, ev sdkevents.Event, repoID string) {
 	ctx, span := otel.Tracer(serviceName).Start(ctx, "notifyEvents")
 	defer span.End()
