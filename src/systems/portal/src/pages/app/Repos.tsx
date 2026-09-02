@@ -1003,6 +1003,7 @@ function PullDetail({ repo, number, onBack, onChanged }: {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'merge' | 'close' | null>(null);
   const [version, setVersion] = useState(0);
+  const [showDiff, setShowDiff] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1087,9 +1088,14 @@ function PullDetail({ repo, number, onBack, onChanged }: {
         )}
       </div>
       {detail.files_error && <ErrorBox>could not summarise the changes — {detail.files_error}</ErrorBox>}
-      {detail.diff !== undefined
-        ? <DiffPanel files={detail.files} diff={detail.diff} />
-        : <Hint>the review diff is shown while a pull request is open</Hint>}
+      {detail.diff !== undefined && (
+        <div style={{ marginTop: 14 }}>
+          <button onClick={() => setShowDiff(v => !v)} style={{ ...ghostBtn, padding: '5px 12px', fontSize: 11 }}>
+            {showDiff ? '▾' : '▸'} files changed{detail.files ? ` (${detail.files.length})` : ''}
+          </button>
+          {showDiff && <div style={{ marginTop: 10 }}><DiffPanel files={detail.files} diff={detail.diff} /></div>}
+        </div>
+      )}
       {detail.status && <ChecksPanel status={detail.status} />}
       {detail.reviews && (
         <ReviewsPanel repo={repo} number={number} reviews={detail.reviews} canReview={open} onChanged={() => setVersion(v => v + 1)} />
