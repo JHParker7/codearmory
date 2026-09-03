@@ -1013,6 +1013,18 @@ func (sr WorkflowStepRun) SetStatus(_ context.Context, status string) {
 		status, status, StatusRunning, sr.StepRunID)
 }
 
+// SetLogs streams the backing action's stdout onto the step run WHILE IT RUNS, so
+// the run view shows an agent's reasoning and tool calls live rather than only when
+// the stage finishes (an agent step used to show nothing for the minutes it ran).
+// Display-only and best-effort: the terminal Complete() writes the authoritative
+// final logs, and this is guarded on ended_at IS NULL so a late poll cannot
+// overwrite a finished row.
+func (sr WorkflowStepRun) SetLogs(_ context.Context, logs string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — display-only; Complete writes the authoritative logs
+		`UPDATE workflow_step_runs SET logs = ? WHERE step_run_id = ? AND ended_at IS NULL`,
+		logs, sr.StepRunID)
+}
+
 // stepJob is one async job a step run is still waiting on: the catalog action that
 // submitted it (which resolves to the service and the cancel endpoint) and the id the
 // service returned.
