@@ -1019,13 +1019,14 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   ) });
   for (const c of commits ?? []) { const agent = commitAgent(c.author_email); items.push({ t: t(c.date), key: 'c' + c.sha, node: (
     <Node color={T.dim}>
-      <span style={{ color: T.green }}>{c.short}</span> <span style={{ color: T.text }}>{c.subject}</span>
-      <span style={{ color: T.faint }}> · </span>
-      {agent
-        ? <span title={`made by an automated ${agent.kind === 'cicd' ? 'CI/CD step' : 'agent'}, not a human`}
+      {/* Order: SHA, then the bot/cicd tag, then the commit message — the tag sits
+          between the sha and the subject so an automated commit is flagged up front. */}
+      <span style={{ color: T.green }}>{c.short}</span>{' '}
+      {agent && <><span title={`made by an automated ${agent.kind === 'cicd' ? 'CI/CD step' : 'agent'}, not a human`}
             style={{ fontFamily: T.mono, fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 5px', border: `1px solid ${agent.kind === 'cicd' ? T.amber : T.blue}`, color: agent.kind === 'cicd' ? T.amber : T.blue, borderRadius: 3 }}>
-            {agent.kind === 'cicd' ? '⚙' : '🤖'} {agent.local}</span>
-        : <span style={{ color: T.faint }}>{c.author}</span>}
+            {agent.kind === 'cicd' ? '⚙' : '🤖'} {agent.local}</span>{' '}</>}
+      <span style={{ color: T.text }}>{c.subject}</span>
+      {!agent && <span style={{ color: T.faint }}> · {c.author}</span>}
       <span style={{ color: T.faint }}> · {ago(c.date)}</span>
     </Node>
   ) }); }
