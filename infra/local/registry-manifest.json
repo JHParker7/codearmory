@@ -2214,9 +2214,46 @@
         "path": "/repos/{id}/protections/{pattern}",
         "action": "setProtection",
         "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/by-path",
+        "action": "getRepo",
+        "resource": "codearmory_git_factory/repos"
       }
     ],
-    "actions": [],
+    "actions": [
+      {
+        "name": "git-factory/resolve-repo",
+        "summary": "Resolve a repo's id from its namespace+name",
+        "method": "GET",
+        "path": "/repos/by-path"
+      },
+      {
+        "name": "git-factory/create-pull",
+        "summary": "Open a pull request (with: id, title, body, source_ref, target_ref)",
+        "method": "POST",
+        "path": "/repos/{id}/pulls"
+      },
+      {
+        "name": "git-factory/pr-comment",
+        "summary": "Post a comment on a pull request (with: id, number, body)",
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/comments"
+      },
+      {
+        "name": "git-factory/merge-pull",
+        "summary": "Merge a pull request (with: id, number, message?)",
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/merge"
+      },
+      {
+        "name": "git-factory/close-pull",
+        "summary": "Close a pull request (with: id, number)",
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/close"
+      }
+    ],
     "default_grants": [
       {
         "grant_on": "user",
