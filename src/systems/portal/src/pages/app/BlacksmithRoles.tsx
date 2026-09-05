@@ -256,7 +256,7 @@ export function BlacksmithRoles() {
       <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>roles/</span>
+            <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>agents/</span>
             <div style={{ display: 'flex', gap: 6 }}>
               <button onClick={startNew}
                 style={{ background: creating ? T.greenSoft : 'transparent', border: `1px solid ${creating ? T.green : T.border}`, color: creating ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+</button>
@@ -264,7 +264,7 @@ export function BlacksmithRoles() {
             </div>
           </div>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-            {roles.length > 0 && `${roles.length} role${roles.length !== 1 ? 's' : ''}`}
+            {roles.length > 0 && `${roles.length} agent${roles.length !== 1 ? 's' : ''}`}
           </div>
         </div>
 

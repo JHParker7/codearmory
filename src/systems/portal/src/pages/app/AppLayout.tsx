@@ -376,7 +376,7 @@ export function AppLayout() {
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto', overflowX: 'hidden' }}>
           <NavSection title="tools" sidebarCollapsed={navCollapsed}>
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
-            <NavItem to="/app/blacksmith-roles" label="agent roles/" desc="Configure the coding-agent roles" service="blacksmith" collapsed={navCollapsed} icon="workflows" />
+            <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
             {/* The git host, under the name people came for. Its route stays the
                 registry name so existing links keep working. */}

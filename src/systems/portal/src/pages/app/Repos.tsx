@@ -33,12 +33,13 @@ import {
   listGitFactoryPRComments, createGitFactoryPRComment, submitGitFactoryPRReview,
   listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
   listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
+  listRuns,
 } from '../../api/bff';
 import type {
   GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
   GitFactoryFileChange, GitFactoryTreeEntry, GitFactoryBlob, GitFactoryPull,
   GitFactoryPullDetail, GitFactoryProtection,
-  GitFactoryPRComment,
+  GitFactoryPRComment, WorkflowRun,
 } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
 import {
@@ -106,6 +107,12 @@ function errorMessage(e: unknown): string {
   if (err?.status === 401) return 'session expired — sign in again';
   if (err?.status === 404) return 'not found — it may have been deleted';
   return err?.message?.trim() || 'request failed';
+}
+
+/** Trim a string to n chars with an ellipsis, flattening newlines for one-line labels. */
+function truncateText(s: string, n: number): string {
+  const flat = s.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
 }
 
 /** Relative time that tolerates a missing/unparsable timestamp. */
@@ -893,6 +900,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const token = useAppSelector(s => s.auth.token)!;
   const [comments, setComments] = useState<GitFactoryPRComment[] | null>(null);
   const [commits, setCommits] = useState<GitFactoryCommit[] | null>(null);
+  const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -916,6 +924,25 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
       .catch(() => { if (!cancelled) setCommits([]); }); // commits are best-effort — the rest of the timeline stands without them
     return () => { cancelled = true; };
   }, [token, repo.id, pr.source_ref, commitCount, version]);
+
+  // The workflows this PR set off. Runs carry the PR identity in their inputs
+  // (repo + number, the provenance link), so a filter surfaces the whole automation
+  // chain: pr-review, and the fix-arm-c runs it fanned out. A fix run is the one that
+  // carries inputs.task (the finding it is fixing) — that discriminator avoids
+  // hard-coding workflow ids. Polled while any run is active so the live indicator moves.
+  useEffect(() => {
+    let cancelled = false;
+    const mine = (r: WorkflowRun) => {
+      const i = r.inputs || {};
+      return i.repo === repo.name && String(i.number ?? '') === String(number);
+    };
+    const load = () => listRuns(token)
+      .then(all => { if (!cancelled) setRuns((all ?? []).filter(mine)); })
+      .catch(() => { /* runs are best-effort — the timeline stands without them */ });
+    load();
+    const iv = setInterval(load, 8000); // cheap poll; keeps the in-progress indicator live
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [token, repo.name, number, version]);
 
   const submitReview = async (state: string) => {
     setBusy(state); setError(null);
@@ -966,6 +993,38 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
       </div>
     </Node>
   ) });
+  // Workflow runs this PR triggered. A fix run carries inputs.task (the finding it fixes);
+  // a run without one is the review itself. RUNNING runs render as a live in-progress entry
+  // (#1 — the automation is visible in the PR as it works); COMPLETED fix runs render as
+  // auto-fixed markers (#2); a failed fix is shown left-open, not hidden. Ordered by time so
+  // the fix entries fall after the fix commits.
+  for (const r of runs) {
+    const task = typeof r.inputs?.task === 'string' ? (r.inputs!.task as string) : '';
+    const isFix = !!task;
+    const finding = task.replace(/^Fix this review finding in the code \(at [^)]*\)\. /, '').replace(/^Issue:\s*/, '');
+    const when = r.ended_at || r.started_at || r.created_at;
+    const running = r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval';
+    const ok = r.status === 'completed';
+    let color: string = T.dim;
+    let label: ReactNode = null;
+    if (running) {
+      color = T.amber;
+      label = <><Pill tone="amber">running</Pill> <span style={{ color: T.textHi }}>{isFix ? 'auto-fixing' : 'reviewing'}</span>{isFix && <span style={{ color: T.faint }}> · {truncateText(finding, 90)}</span>} <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
+    } else if (isFix && ok) {
+      color = T.green;
+      label = <><Pill tone="green">auto-fixed</Pill> <span style={{ color: T.text }}>{truncateText(finding, 100)}</span> <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
+    } else if (isFix) {
+      color = T.red;
+      label = <><Pill tone="red">fix left open</Pill> <span style={{ color: T.text }}>{truncateText(finding, 100)}</span> <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
+    } else if (ok) {
+      color = T.blue;
+      label = <><Pill tone="blue">reviewed</Pill> <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
+    } else {
+      continue; // a non-fix run that didn't complete cleanly — not worth a timeline line
+    }
+    // running entries sort to "now" so they sit at the live end; others by their time.
+    items.push({ t: running ? Date.now() : t(when), key: 'w' + r.run_id, node: <Node color={color}>{label}</Node> });
+  }
   if (pr.state === 'merged') items.push({ t: t(pr.updated_at), key: 'zmerged', node: (
     <Node color={T.blue}><span style={{ color: T.blue }}>merged</span>{pr.merge_commit && <> as <span style={{ color: T.green }}>{pr.merge_commit.slice(0, 8)}</span></>} · <span style={{ color: T.faint }}>{ago(pr.updated_at)}</span></Node>
   ) });
