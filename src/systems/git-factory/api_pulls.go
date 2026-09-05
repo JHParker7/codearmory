@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,18 +28,24 @@ import (
 // so it works unchanged when the git plane moves to a remote node (§5 Step 3).
 
 type PullRequest struct {
-	ID          string    `gorm:"primaryKey" json:"id"`
-	RepoID      string    `gorm:"index" json:"repo_id"`
-	Number      int       `json:"number"` // per-repo, human-facing
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	SourceRef   string    `json:"source_ref"` // the branch being merged
-	TargetRef   string    `json:"target_ref"` // the branch merged into
-	State       string    `json:"state"`      // open | merged | closed
-	Author      string    `json:"author"`     // gatekeeper user_id
-	MergeCommit string    `json:"merge_commit,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID        string `gorm:"primaryKey" json:"id"`
+	RepoID    string `gorm:"index" json:"repo_id"`
+	Number    int    `json:"number"` // per-repo, human-facing
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	SourceRef string `json:"source_ref"` // the branch being merged
+	TargetRef string `json:"target_ref"` // the branch merged into
+	State     string `json:"state"`      // open | merged | closed
+	Author    string `json:"author"`     // gatekeeper user_id (the DISPLAYED opener)
+	// OpenedByUserID is the identity that actually called createPull. It differs from
+	// Author only when an authorised automation caller attributed the PR to a bot
+	// display identity via the createPull `author` override: Author is the bot shown
+	// in the UI, OpenedByUserID is the real caller, kept for accountability. Empty
+	// when no override was used (then the opener IS Author) and on pre-existing rows.
+	OpenedByUserID string    `json:"opened_by,omitempty"`
+	MergeCommit    string    `json:"merge_commit,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 const (
@@ -56,6 +63,22 @@ func nextPRNumber(ctx context.Context, repoID string) int {
 	return max.N + 1
 }
 
+// automationAuthors returns the set of user ids that a createPull caller may name in
+// the `author` override, read from GIT_FACTORY_AUTOMATION_USERS (comma-separated). A
+// workflow opening a PR with its own per-run repo token can thereby show a stable bot
+// as the opener while the real caller stays authorised and recorded (OpenedByUserID).
+// Restricting to this allowlist keeps the override pointing only at sanctioned bot
+// accounts. Empty/unset turns the feature off.
+func automationAuthors() map[string]bool {
+	out := map[string]bool{}
+	for _, id := range strings.Split(os.Getenv("GIT_FACTORY_AUTOMATION_USERS"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleCreatePull")
 	defer span.End()
@@ -69,6 +92,11 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		Body      string `json:"body"`
 		SourceRef string `json:"source_ref"`
 		TargetRef string `json:"target_ref"`
+		// Author, when set, attributes the PR to an allowlisted automation identity
+		// (see automationAuthors). It lets a workflow that opens a PR with its own
+		// per-run repo credential still show a stable bot as the opener, without that
+		// bot holding any credential or grant. Ignored for a self-attribution.
+		Author string `json:"author"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -100,10 +128,22 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Optional author override: the caller has already passed the createPull check
+	// above, so this only decides ATTRIBUTION, never access. It is guarded to the
+	// automation allowlist so it can name a sanctioned bot but never impersonate a
+	// human, and the true caller is retained in OpenedByUserID for accountability.
+	author, openedBy := userID, ""
+	if req.Author != "" && req.Author != userID {
+		if !automationAuthors()[req.Author] {
+			http.Error(w, "author override must name an allowlisted automation account", http.StatusForbidden)
+			return
+		}
+		author, openedBy = req.Author, userID
+	}
 	pr := PullRequest{
 		ID: uuid.New().String(), RepoID: re.ID, Number: nextPRNumber(ctx, re.ID),
 		Title: req.Title, Body: req.Body, SourceRef: req.SourceRef, TargetRef: req.TargetRef,
-		State: prOpen, Author: userID,
+		State: prOpen, Author: author, OpenedByUserID: openedBy,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := connect().WithContext(ctx).Create(&pr).Error; err != nil {
@@ -111,7 +151,7 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	slog.InfoContext(ctx, "pull request opened", "Repo_id", re.ID, "number", pr.Number, "author", userID)
+	slog.InfoContext(ctx, "pull request opened", "Repo_id", re.ID, "number", pr.Number, "author", pr.Author, "opened_by", userID)
 	// Announce the open so a trigger can run CI or a review on it. Detached (a slow
 	// events service must not hold the request), tenant = repo owner (notifyPullRequest).
 	head, _ := branchTip(ctx, re.ID, pr.SourceRef)
