@@ -391,6 +391,47 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, re)
 }
 
+// handleResolveRepo returns a repo by its namespace+name (query params), so a caller
+// that only knows the human path can obtain the uuid the PR routes are keyed on. It
+// exists for the workflow actions: git-factory's JSON REST is id-keyed, but a workflow
+// only has the namespace/name, so this is the first hop that yields the id to chain into
+// create-pull/pr-comment/merge. Same authz as getRepo (a denial reads as 404).
+func handleResolveRepo(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleResolveRepo")
+	defer span.End()
+
+	if r.Header.Get("Authorization") == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	namespace, name := r.URL.Query().Get("namespace"), r.URL.Query().Get("name")
+	if namespace == "" || name == "" {
+		http.Error(w, "namespace and name query params are required", http.StatusBadRequest)
+		return
+	}
+	re, err := getRepoByPath(ctx, namespace, name)
+	if err != nil {
+		if errors.Is(err, errRepoNotFound) {
+			http.Error(w, "Repo not found", http.StatusNotFound)
+			return
+		}
+		slog.ErrorContext(ctx, "resolve repo", "namespace", namespace, "name", name, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	// A denial reads as 404, mirroring authorizeRepo, so this endpoint can't be used to
+	// probe the existence of repos the caller may not see.
+	aw := &notFoundOnDeny{ResponseWriter: w}
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, aw, r, "getRepo", resRepoOf(re)); !ok {
+		if aw.swallowed {
+			http.Error(w, "Repo not found", http.StatusNotFound)
+		}
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	writeJSON(w, http.StatusOK, re)
+}
+
 // handleUpdateRepo updates a Repo owned by the caller.
 func handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleUpdateRepo")

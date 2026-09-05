@@ -220,6 +220,9 @@ func main() {
 	// via gatekeeperClient.CheckPermissions(action, resource) before doing work.
 	mux.HandleFunc("GET /repos", handleListRepos)
 	mux.HandleFunc("POST /repos", handleCreateRepo)
+	// by-path resolve (namespace+name -> repo incl. id) for the workflow actions; the
+	// literal segment is more specific than {id} so the mux routes it correctly.
+	mux.HandleFunc("GET /repos/by-path", handleResolveRepo)
 	mux.HandleFunc("GET /repos/{id}", handleGetRepo)
 	mux.HandleFunc("PATCH /repos/{id}", handleUpdateRepo)
 	mux.HandleFunc("DELETE /repos/{id}", handleDeleteRepo)
