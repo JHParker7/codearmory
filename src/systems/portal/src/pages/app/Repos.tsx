@@ -33,7 +33,7 @@ import {
   listGitFactoryPRComments, createGitFactoryPRComment, submitGitFactoryPRReview,
   listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
   listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
-  listRuns, listWorkflows,
+  listRuns, listWorkflows, listUsers,
 } from '../../api/bff';
 import type {
   GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
@@ -907,6 +907,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const [commits, setCommits] = useState<GitFactoryCommit[] | null>(null);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [wfNames, setWfNames] = useState<Record<string, string>>({});
+  const [userNames, setUserNames] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -959,6 +960,18 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     return () => { cancelled = true; };
   }, [token]);
 
+  // gatekeeper user_id → username, so a comment/review/PR author shows the agent (or
+  // person) name in full — git-factory records authors as user_ids, which otherwise
+  // render as a truncated uuid.
+  useEffect(() => {
+    let cancelled = false;
+    listUsers(token)
+      .then(us => { if (!cancelled) setUserNames(Object.fromEntries((us ?? []).map(u => [u.user_id, u.username]))); })
+      .catch(() => { /* best-effort; fall back to the id */ });
+    return () => { cancelled = true; };
+  }, [token]);
+  const authorName = (id: string) => userNames[id] || id; // full, never truncated
+
   const submitReview = async (state: string) => {
     setBusy(state); setError(null);
     try { await submitGitFactoryPRReview(token, repo.id, number, state, body); setBody(''); setVersion(v => v + 1); onChanged(); }
@@ -974,7 +987,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const t = (iso: string) => new Date(iso).getTime();
   const items: { t: number; key: string; node: ReactNode }[] = [];
   items.push({ t: t(pr.created_at), key: '0opened', node: (
-    <Node color={T.green}><span style={{ color: T.textHi }}>{shortId(pr.author)}</span> opened this pull request · <span style={{ color: T.faint }}>{ago(pr.created_at)}</span></Node>
+    <Node color={T.green}><span style={{ color: T.textHi }}>{authorName(pr.author)}</span> opened this pull request · <span style={{ color: T.faint }}>{ago(pr.created_at)}</span></Node>
   ) });
   for (const c of commits ?? []) { const agent = commitAgent(c.author_email); items.push({ t: t(c.date), key: 'c' + c.sha, node: (
     <Node color={T.dim}>
@@ -984,7 +997,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
         ? <span title={`made by an automated ${agent.kind === 'cicd' ? 'CI/CD step' : 'agent'}, not a human`}
             style={{ fontFamily: T.mono, fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 5px', border: `1px solid ${agent.kind === 'cicd' ? T.amber : T.blue}`, color: agent.kind === 'cicd' ? T.amber : T.blue, borderRadius: 3 }}>
             {agent.kind === 'cicd' ? '⚙' : '🤖'} {agent.local}</span>
-        : <span style={{ color: T.faint }}>{shortId(c.author)}</span>}
+        : <span style={{ color: T.faint }}>{c.author}</span>}
       <span style={{ color: T.faint }}> · {ago(c.date)}</span>
     </Node>
   ) }); }
@@ -1000,7 +1013,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     <Node color={reviewTone(r.state) === 'green' ? T.green : reviewTone(r.state) === 'red' ? T.red : T.dim} card={!!r.body}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <Pill tone={reviewTone(r.state)}>{r.state === 'changes_requested' ? 'changes requested' : r.state}</Pill>
-        <span style={{ color: T.textHi }}>{shortId(r.reviewer)}</span>
+        <span style={{ color: T.textHi }}>{authorName(r.reviewer)}</span>
         <span style={{ color: T.faint, fontSize: 10 }}>{ago(r.created_at)}</span>
       </div>
       {r.body && <div style={{ border: `1px solid ${T.border}`, background: T.bgAlt, padding: '4px 9px', marginTop: 5, color: T.text }}><Markdown source={r.body} /></div>}
@@ -1010,7 +1023,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     <Node color={T.blue} card>
       <div style={{ border: `1px solid ${T.border}`, background: T.bgAlt }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${T.border}`, fontSize: 10.5 }}>
-          <span style={{ color: T.textHi, fontWeight: 600 }}>{shortId(c.author)}</span>
+          <span style={{ color: T.textHi, fontWeight: 600 }}>{authorName(c.author)}</span>
           <span style={{ color: T.faint }}>commented · {ago(c.created_at)}</span>
         </div>
         <div style={{ padding: '2px 11px 6px' }}><Markdown source={c.body} /></div>
