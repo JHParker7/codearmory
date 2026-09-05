@@ -109,6 +109,12 @@ function errorMessage(e: unknown): string {
   return err?.message?.trim() || 'request failed';
 }
 
+/** Trim a string to n chars with an ellipsis, flattening whitespace for one-line labels. */
+function truncateText(s: string, n: number): string {
+  const flat = s.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
+}
+
 /** The automated author behind a commit, from the author email's domain suffix:
  *  <role>@blacksmith.agent → a coding agent; <step>@forge.cicd → a CI/CD step. The
  *  local part is the specific identity (the role or the step). Returns null for a
@@ -908,7 +914,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [wfNames, setWfNames] = useState<Record<string, string>>({});
   const [userNames, setUserNames] = useState<Record<string, string>>({});
-  const [plannedByFlow, setPlannedByFlow] = useState<Record<string, number>>({}); // reviewer run_id → # fixes the map will run
+  const [plannedTasks, setPlannedTasks] = useState<Record<string, string[]>>({}); // reviewer run_id → the fix tasks its map will run (in order)
   const [error, setError] = useState<string | null>(null);
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -954,18 +960,18 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
         // run, from its extract step's tasks output, so the plan (incl. not-yet-started
         // fixers) is visible. Best-effort, one extra fetch per reviewer flow.
         const flows = ours.filter(r => !r.inputs?.task); // pr-review has no inputs.task; fix runs do
-        const planned: Record<string, number> = {};
+        const planned: Record<string, string[]> = {};
         await Promise.all(flows.map(async f => {
           try {
             const full = await getRun(token, f.run_id);
             const ex = (full.step_runs || []).find(s => s.step_name.split(' [')[0] === 'extract');
             let raw: unknown = ex?.output;
             if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { /* not json */ } }
-            let tasksStr = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>).tasks : undefined;
-            if (typeof tasksStr === 'string') { try { const arr = JSON.parse(tasksStr); if (Array.isArray(arr)) planned[f.run_id] = arr.length; } catch { /* */ } }
+            const tasksStr = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>).tasks : undefined;
+            if (typeof tasksStr === 'string') { try { const arr = JSON.parse(tasksStr); if (Array.isArray(arr)) planned[f.run_id] = arr.map(String); } catch { /* */ } }
           } catch { /* best-effort */ }
         }));
-        if (!cancelled) setPlannedByFlow(planned);
+        if (!cancelled) setPlannedTasks(planned);
       })
       .catch(() => { /* runs are best-effort — the timeline stands without them */ });
     load();
@@ -1088,20 +1094,24 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     const kids = childrenOf(r.run_id);
     const flowName = wfNames[r.workflow_id] || 'review';
     // one timeline item per reviewer flow, carrying its nested fixers + the queued plan.
+    // Each planned fix the map WILL run but hasn't started — shown individually (not
+    // collapsed to a count) so the whole fan-out plan is visible. A planned task is
+    // "started" once a child fix run carries it as inputs.task.
+    const startedTasks = new Set(kids.map(k => typeof k.inputs?.task === 'string' ? k.inputs!.task as string : ''));
+    const queuedTasks = (plannedTasks[r.run_id] || []).filter(tk => !startedTasks.has(tk));
+    const findingOf = (task: string) => task.replace(/^Fix this review finding in the code \(at [^)]*\)\.\s*/, '').replace(/^Issue:\s*/, '');
     items.push({ t: running ? Date.now() : t(when), key: 'w' + r.run_id, node: (
       <div>
         {runNode(r)}
         {kids.map(k => <div key={k.run_id}>{runNode(k, { child: true, parentName: flowName })}</div>)}
-        {(() => {
-          const planned = plannedByFlow[r.run_id];
-          const queued = planned !== undefined ? planned - kids.length : 0;
-          return queued > 0 ? (
-            <div style={{ marginLeft: 18 }}><Node color={T.dim}>
-              <span style={{ color: T.faint }}>↳ </span><Pill tone="dim">todo</Pill>
-              <span style={{ color: T.faint }}> · {queued} more auto-fix{queued === 1 ? '' : 'es'} queued by {flowName}</span>
-            </Node></div>
-          ) : null;
-        })()}
+        {queuedTasks.map((tk, i) => (
+          <div key={'q' + i} style={{ marginLeft: 18 }}><Node color={T.dim}>
+            <span style={{ color: T.faint }}>↳ </span>
+            <span style={{ color: T.textHi, fontWeight: 600 }}>autofix</span>
+            <span style={{ color: T.faint }}> · </span><Pill tone="dim">todo</Pill>
+            <span style={{ color: T.faint }}> · queued by {flowName} · {truncateText(findingOf(tk), 80)}</span>
+          </Node></div>
+        ))}
       </div>
     ) });
   }
