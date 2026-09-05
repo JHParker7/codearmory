@@ -29,13 +29,18 @@ import (
 // reviewer or collaborator inherits it through shareActions.
 
 type PRComment struct {
-	ID        string    `gorm:"primaryKey" json:"id"`
-	RepoID    string    `gorm:"index" json:"repo_id"`
-	PullID    string    `gorm:"index" json:"pull_id"`
-	Author    string    `json:"author"` // gatekeeper user_id
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID     string `gorm:"primaryKey" json:"id"`
+	RepoID string `gorm:"index" json:"repo_id"`
+	PullID string `gorm:"index" json:"pull_id"`
+	Author string `json:"author"` // gatekeeper user_id (the DISPLAYED author)
+	// CreatedByUserID is the identity that actually called createPullComment. It differs
+	// from Author only when an authorised automation caller attributed the comment to a
+	// bot display identity via the `author` override (see automationAuthors); the real
+	// caller is kept here for accountability. Empty when no override was used.
+	CreatedByUserID string    `json:"created_by,omitempty"`
+	Body            string    `json:"body"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // prCommentBodyMax caps a comment the way the PR body and ticket description are
@@ -82,6 +87,10 @@ func handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Body string `json:"body"`
+		// Author, when set, attributes the comment to an allowlisted automation identity
+		// (see automationAuthors), so an automated review/scan/release comment shows the
+		// bot rather than the run's user. Same allowlist guard as createPull.
+		Author string `json:"author"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -96,9 +105,19 @@ func handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	// Author override: attribution only (the createPullComment check already passed),
+	// confined to the automation allowlist so it names a sanctioned bot but not a human.
+	author, createdBy := userID, ""
+	if req.Author != "" && req.Author != userID {
+		if !automationAuthors()[req.Author] {
+			http.Error(w, "author override must name an allowlisted automation account", http.StatusForbidden)
+			return
+		}
+		author, createdBy = req.Author, userID
+	}
 	c := PRComment{
 		ID: uuid.New().String(), RepoID: re.ID, PullID: pr.ID,
-		Author: userID, Body: req.Body,
+		Author: author, CreatedByUserID: createdBy, Body: req.Body,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := connect().WithContext(ctx).Create(&c).Error; err != nil {
@@ -106,7 +125,7 @@ func handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	slog.InfoContext(ctx, "pull request comment added", "Repo_id", re.ID, "number", pr.Number, "author", userID)
+	slog.InfoContext(ctx, "pull request comment added", "Repo_id", re.ID, "number", pr.Number, "author", c.Author, "created_by", userID)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusCreated, c)
 }
