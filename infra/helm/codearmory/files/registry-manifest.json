@@ -1966,13 +1966,19 @@
         "path": "/repos/by-path",
         "action": "getRepo",
         "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/by-path",
+        "action": "getRepo",
+        "resource": "codearmory_git_factory/repos"
       }
     ],
     "actions": [
       {
         "name": "git-factory/resolve-repo",
-        "summary": "Resolve a repo's id from its namespace+name",
-        "method": "GET",
+        "summary": "Resolve a repo's id from its namespace+name (with: namespace, name)",
+        "method": "POST",
         "path": "/repos/by-path"
       },
       {

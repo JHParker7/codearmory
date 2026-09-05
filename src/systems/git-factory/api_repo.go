@@ -391,11 +391,19 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, re)
 }
 
-// handleResolveRepo returns a repo by its namespace+name (query params), so a caller
-// that only knows the human path can obtain the uuid the PR routes are keyed on. It
-// exists for the workflow actions: git-factory's JSON REST is id-keyed, but a workflow
-// only has the namespace/name, so this is the first hop that yields the id to chain into
+// handleResolveRepo returns a repo by its namespace+name, so a caller that only knows
+// the human path can obtain the uuid the PR routes are keyed on. It exists for the
+// workflow actions: git-factory's JSON REST is id-keyed, but a workflow only has the
+// namespace/name, so this is the first hop that yields the id to chain into
 // create-pull/pr-comment/merge. Same authz as getRepo (a denial reads as 404).
+//
+// It is a POST that reads namespace/name from a JSON body, with a query-param fallback
+// for direct GET callers. POST-for-a-read is deliberate: measured on the gf-action-smoke
+// run, the workflows engine sends a step's `with` map only as a JSON body or into {param}
+// path placeholders — it has no query-string path (worker.go executeAction). A GET action
+// reading r.URL.Query() never received the params, and a {namespace}/{name} path form
+// collides with GET /repos/{id}/commits/{sha} in the mux (both 4-segment, neither more
+// specific), so a body-carrying POST is the only shape the engine can drive here.
 func handleResolveRepo(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleResolveRepo")
 	defer span.End()
@@ -406,7 +414,17 @@ func handleResolveRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	namespace, name := r.URL.Query().Get("namespace"), r.URL.Query().Get("name")
 	if namespace == "" || name == "" {
-		http.Error(w, "namespace and name query params are required", http.StatusBadRequest)
+		var req struct {
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+		}
+		// Body is optional for the GET/query form; ignore decode errors and let the
+		// emptiness check below produce the actionable 400.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		namespace, name = req.Namespace, req.Name
+	}
+	if namespace == "" || name == "" {
+		http.Error(w, "namespace and name are required (JSON body or query params)", http.StatusBadRequest)
 		return
 	}
 	re, err := getRepoByPath(ctx, namespace, name)

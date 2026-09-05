@@ -221,7 +221,12 @@ func main() {
 	mux.HandleFunc("GET /repos", handleListRepos)
 	mux.HandleFunc("POST /repos", handleCreateRepo)
 	// by-path resolve (namespace+name -> repo incl. id) for the workflow actions; the
-	// literal segment is more specific than {id} so the mux routes it correctly.
+	// literal "by-path" segment is more specific than {id} so the mux routes it correctly.
+	// The POST form (namespace/name in a JSON body) is the one the workflows engine can
+	// drive — it only sends a step's `with` as a JSON body (see handleResolveRepo); the GET
+	// query form stays for direct API callers. A {namespace}/{name} path form is NOT usable:
+	// it conflicts with GET /repos/{id}/commits/{sha} in the mux (both 4-segment).
+	mux.HandleFunc("POST /repos/by-path", handleResolveRepo)
 	mux.HandleFunc("GET /repos/by-path", handleResolveRepo)
 	mux.HandleFunc("GET /repos/{id}", handleGetRepo)
 	mux.HandleFunc("PATCH /repos/{id}", handleUpdateRepo)
