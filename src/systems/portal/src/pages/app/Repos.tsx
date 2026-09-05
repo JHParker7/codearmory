@@ -33,7 +33,7 @@ import {
   listGitFactoryPRComments, createGitFactoryPRComment, submitGitFactoryPRReview,
   listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
   listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
-  listRuns,
+  listRuns, listWorkflows,
 } from '../../api/bff';
 import type {
   GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
@@ -109,10 +109,15 @@ function errorMessage(e: unknown): string {
   return err?.message?.trim() || 'request failed';
 }
 
-/** Trim a string to n chars with an ellipsis, flattening newlines for one-line labels. */
-function truncateText(s: string, n: number): string {
-  const flat = s.replace(/\s+/g, ' ').trim();
-  return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
+/** The automated author behind a commit, from the author email's domain suffix:
+ *  <role>@blacksmith.agent → a coding agent; <step>@forge.cicd → a CI/CD step. The
+ *  local part is the specific identity (the role or the step). Returns null for a
+ *  human commit (any other domain). Identity-based, not a parsed display name. */
+function commitAgent(email?: string): { local: string; kind: 'agent' | 'cicd' } | null {
+  const e = (email || '').trim().toLowerCase();
+  const m = /^([^@]+)@[a-z0-9._-]*\.(agent|cicd)$/.exec(e);
+  if (!m) return null;
+  return { local: m[1], kind: m[2] as 'agent' | 'cicd' };
 }
 
 /** Relative time that tolerates a missing/unparsable timestamp. */
@@ -901,6 +906,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const [comments, setComments] = useState<GitFactoryPRComment[] | null>(null);
   const [commits, setCommits] = useState<GitFactoryCommit[] | null>(null);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const [wfNames, setWfNames] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -944,6 +950,15 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     return () => { cancelled = true; clearInterval(iv); };
   }, [token, repo.name, number, version]);
 
+  // workflow_id → name, so a run entry can read "pr-review" / "fix-arm-c" not a uuid.
+  useEffect(() => {
+    let cancelled = false;
+    listWorkflows(token)
+      .then(ws => { if (!cancelled) setWfNames(Object.fromEntries((ws ?? []).map(w => [w.workflow_id, w.name]))); })
+      .catch(() => { /* names are best-effort; fall back to the short id */ });
+    return () => { cancelled = true; };
+  }, [token]);
+
   const submitReview = async (state: string) => {
     setBusy(state); setError(null);
     try { await submitGitFactoryPRReview(token, repo.id, number, state, body); setBody(''); setVersion(v => v + 1); onChanged(); }
@@ -961,9 +976,18 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   items.push({ t: t(pr.created_at), key: '0opened', node: (
     <Node color={T.green}><span style={{ color: T.textHi }}>{shortId(pr.author)}</span> opened this pull request · <span style={{ color: T.faint }}>{ago(pr.created_at)}</span></Node>
   ) });
-  for (const c of commits ?? []) items.push({ t: t(c.date), key: 'c' + c.sha, node: (
-    <Node color={T.dim}><span style={{ color: T.green }}>{c.short}</span> <span style={{ color: T.text }}>{c.subject}</span> <span style={{ color: T.faint }}>· {shortId(c.author)} · {ago(c.date)}</span></Node>
-  ) });
+  for (const c of commits ?? []) { const agent = commitAgent(c.author_email); items.push({ t: t(c.date), key: 'c' + c.sha, node: (
+    <Node color={T.dim}>
+      <span style={{ color: T.green }}>{c.short}</span> <span style={{ color: T.text }}>{c.subject}</span>
+      <span style={{ color: T.faint }}> · </span>
+      {agent
+        ? <span title={`made by an automated ${agent.kind === 'cicd' ? 'CI/CD step' : 'agent'}, not a human`}
+            style={{ fontFamily: T.mono, fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 5px', border: `1px solid ${agent.kind === 'cicd' ? T.amber : T.blue}`, color: agent.kind === 'cicd' ? T.amber : T.blue, borderRadius: 3 }}>
+            {agent.kind === 'cicd' ? '⚙' : '🤖'} {agent.local}</span>
+        : <span style={{ color: T.faint }}>{shortId(c.author)}</span>}
+      <span style={{ color: T.faint }}> · {ago(c.date)}</span>
+    </Node>
+  ) }); }
   for (const s of (status?.statuses ?? [])) items.push({ t: t(s.created_at), key: 's' + s.id, node: (
     <Node color={statusColor(s.state)}>
       <Pill tone={statusTone(s.state)}>{s.state}</Pill> <span style={{ color: T.textHi }}>{s.context}</span>
@@ -993,37 +1017,31 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
       </div>
     </Node>
   ) });
-  // Workflow runs this PR triggered. A fix run carries inputs.task (the finding it fixes);
-  // a run without one is the review itself. RUNNING runs render as a live in-progress entry
-  // (#1 — the automation is visible in the PR as it works); COMPLETED fix runs render as
-  // auto-fixed markers (#2); a failed fix is shown left-open, not hidden. Ordered by time so
-  // the fix entries fall after the fix commits.
+  // Workflow runs this PR triggered (via the provenance link). Each renders as a compact
+  // <workflow name> · <status> · <run id> entry — the automation visible in the PR, live
+  // (#1) as it runs and as history (#2) once done. The per-finding detail lives in the fix
+  // runs' resolution comments; the timeline entry stays terse. Running entries sort to the
+  // live end; the rest by their time so they fall after the fix commits.
   for (const r of runs) {
-    const task = typeof r.inputs?.task === 'string' ? (r.inputs!.task as string) : '';
-    const isFix = !!task;
-    const finding = task.replace(/^Fix this review finding in the code \(at [^)]*\)\. /, '').replace(/^Issue:\s*/, '');
-    const when = r.ended_at || r.started_at || r.created_at;
+    const name = wfNames[r.workflow_id] || r.workflow_id.slice(0, 8);
     const running = r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval';
-    const ok = r.status === 'completed';
-    let color: string = T.dim;
-    let label: ReactNode = null;
-    if (running) {
-      color = T.amber;
-      label = <><Pill tone="amber">running</Pill> <span style={{ color: T.textHi }}>{isFix ? 'auto-fixing' : 'reviewing'}</span>{isFix && <span style={{ color: T.faint }}> · {truncateText(finding, 90)}</span>} <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
-    } else if (isFix && ok) {
-      color = T.green;
-      label = <><Pill tone="green">auto-fixed</Pill> <span style={{ color: T.text }}>{truncateText(finding, 100)}</span> <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
-    } else if (isFix) {
-      color = T.red;
-      label = <><Pill tone="red">fix left open</Pill> <span style={{ color: T.text }}>{truncateText(finding, 100)}</span> <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
-    } else if (ok) {
-      color = T.blue;
-      label = <><Pill tone="blue">reviewed</Pill> <span style={{ color: T.faint, fontSize: 10 }}>· {ago(when)}</span></>;
-    } else {
-      continue; // a non-fix run that didn't complete cleanly — not worth a timeline line
-    }
-    // running entries sort to "now" so they sit at the live end; others by their time.
-    items.push({ t: running ? Date.now() : t(when), key: 'w' + r.run_id, node: <Node color={color}>{label}</Node> });
+    const st = r.status === 'completed' ? 'success'
+      : r.status === 'failed' || r.status === 'error' ? 'fail'
+      : r.status === 'pending' ? 'todo'
+      : r.status === 'cancelled' ? 'cancelled'
+      : r.status; // running / awaiting_approval / other
+    const tone: 'green' | 'amber' | 'red' | 'dim' | 'blue' =
+      st === 'success' ? 'green' : st === 'fail' ? 'red' : running ? 'amber' : 'dim';
+    const color = tone === 'green' ? T.green : tone === 'red' ? T.red : tone === 'amber' ? T.amber : T.dim;
+    const when = r.ended_at || r.started_at || r.created_at;
+    items.push({ t: running ? Date.now() : t(when), key: 'w' + r.run_id, node: (
+      <Node color={color}>
+        <span style={{ color: T.textHi, fontWeight: 600 }}>{name}</span>
+        <span style={{ color: T.faint }}> · </span><Pill tone={tone}>{st}</Pill>
+        <span style={{ color: T.faint }}> · {r.run_id.slice(0, 8)}</span>
+        <span style={{ color: T.faint, fontSize: 10 }}> · {ago(when)}</span>
+      </Node>
+    ) });
   }
   if (pr.state === 'merged') items.push({ t: t(pr.updated_at), key: 'zmerged', node: (
     <Node color={T.blue}><span style={{ color: T.blue }}>merged</span>{pr.merge_commit && <> as <span style={{ color: T.green }}>{pr.merge_commit.slice(0, 8)}</span></>} · <span style={{ color: T.faint }}>{ago(pr.updated_at)}</span></Node>

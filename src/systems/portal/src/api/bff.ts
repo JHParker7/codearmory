@@ -1491,6 +1491,9 @@ export interface GitFactoryCommit {
   sha: string;
   short: string;
   author: string;
+  /** Author email — its domain suffix identifies an automated author:
+   *  <role>@blacksmith.agent (a coding agent) or <step>@forge.cicd (a CI/CD step). */
+  author_email?: string;
   date: string;
   subject: string;
 }

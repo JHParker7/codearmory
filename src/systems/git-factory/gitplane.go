@@ -282,8 +282,12 @@ type commit struct {
 	SHA     string `json:"sha"`
 	Short   string `json:"short"`
 	Author  string `json:"author"`
-	Date    string `json:"date"` // RFC3339, straight from git
-	Subject string `json:"subject"`
+	// AuthorEmail lets a client tell an automated agent's commit from a human's by the
+	// author identity itself (blacksmith authors agent commits under an agents.* domain),
+	// rather than parsing the display name.
+	AuthorEmail string `json:"author_email"`
+	Date        string `json:"date"` // RFC3339, straight from git
+	Subject     string `json:"subject"`
 }
 
 // commitLogSep is an ASCII unit separator: it cannot appear in any of the fields git
@@ -387,7 +391,7 @@ func listCommits(ctx context.Context, repoID string, q commitQuery) ([]commit, e
 	args := []string{"-C", dir, "log",
 		"--max-count=" + strconv.Itoa(q.Limit),
 		"--skip=" + strconv.Itoa(q.Skip),
-		"--format=%H" + commitLogSep + "%an" + commitLogSep + "%aI" + commitLogSep + "%s",
+		"--format=%H" + commitLogSep + "%an" + commitLogSep + "%aI" + commitLogSep + "%s" + commitLogSep + "%ae",
 	}
 	args = append(args, q.filterArgs()...)
 	args = append(args, q.ref(), "--")
@@ -406,15 +410,19 @@ func listCommits(ctx context.Context, repoID string, q commitQuery) ([]commit, e
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, commitLogSep, 4)
-		if len(f) != 4 {
+		f := strings.SplitN(line, commitLogSep, 5)
+		if len(f) < 4 {
 			continue
 		}
 		short := f[0]
 		if len(short) > 7 {
 			short = short[:7]
 		}
-		commits = append(commits, commit{SHA: f[0], Short: short, Author: f[1], Date: f[2], Subject: f[3]})
+		email := ""
+		if len(f) == 5 {
+			email = f[4]
+		}
+		commits = append(commits, commit{SHA: f[0], Short: short, Author: f[1], Date: f[2], Subject: f[3], AuthorEmail: email})
 	}
 	return commits, nil
 }
