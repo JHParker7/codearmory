@@ -741,6 +741,49 @@ tickets:
     clientCertSecret: ""
     caBundle: ""
 
+# ── Blacksmith ───────────────────────────────────────
+# The agent harness: ONE general `blacksmith/agent` action the workflows engine
+# invokes to run a configured agent (roles are editable data in postgres). It
+# reaches ollama as a remote OpenAI endpoint on the workstation (the host bound
+# to the codearmory bridge, 192.168.67.1) and everything else over in-cluster
+# DNS. Runs the plan pipeline; the sandbox that executes agent code is a forge
+# execution, not a local container.
+blacksmith:
+  enabled: true
+  image:
+    repository: blacksmith
+    # A locally-built image loaded with `minikube image load
+    # ghcr.io/code-armory-app/blacksmith:dev`; imagePullPolicy IfNotPresent finds
+    # it without reaching ghcr.
+    tag: dev
+  replicaCount: 1
+  port: 8199
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  env:
+    logLevel: info
+    # OTLP collector on the workstation (deploy/observability docker-compose),
+    # reached over the codearmory bridge — grafana/tempo at localhost:3000/3200.
+    otelEndpoint: "http://192.168.67.1:4318"
+    # ollama on the workstation, reached over the codearmory bridge.
+    modelEndpoint: "http://192.168.67.1:11434/v1"
+    model: "qwen3.8:latest"
+    slots: 1
+    forgeEmail: "admin@blacksmith.invalid"
+    runnerImage: "golang:1.25"
+    runnerClass: "large"
+  secret:
+    # Secrets are NOT stored here — pass at install with
+    #   --set blacksmith.secret.registryServiceKey=... --set blacksmith.secret.forgePassword=...
+    # so no credential lands in the committed chart.
+    registryServiceKey: ""
+    forgePassword: ""
+
 # ── Events ───────────────────────────────────────────
 # Event collector + reactor (supersedes the former hooks service): services emit JSON events to
 # /internal/events; triggers whose field-filters match dispatch actions (run a
@@ -1040,6 +1083,11 @@ gitFactory:
     # shared-storage path, where the whole point is that the service cannot tell from
     # the inside that GIT_STORAGE_ROOT now means something entirely different.
     storagePreflight: ""
+    # Comma-separated gatekeeper user ids permitted as a createPull `author` override,
+    # letting a workflow attribute a PR it opens (with its own per-run repo credential)
+    # to a bot display account without that account holding any credential or grant.
+    # Attribution only; the real caller stays authorised and recorded. Empty disables it.
+    automationUsers: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
