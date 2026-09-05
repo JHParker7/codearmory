@@ -500,6 +500,9 @@ export interface WorkflowRun {
   org_id?: string | null;
   status: string;
   current_step?: number | null;
+  /** The run that triggered this one (a workflows/trigger sub-run), and the nesting depth. */
+  parent_run_id?: string | null;
+  depth?: number | null;
   inputs?: Record<string, unknown> | null;
   /** Declared pipeline outputs resolved from step outputs at completion. */
   outputs?: Record<string, string> | null;

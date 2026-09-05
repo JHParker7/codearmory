@@ -33,7 +33,7 @@ import {
   listGitFactoryPRComments, createGitFactoryPRComment, submitGitFactoryPRReview,
   listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
   listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
-  listRuns, listWorkflows, listUsers,
+  listRuns, listWorkflows, listUsers, getRun,
 } from '../../api/bff';
 import type {
   GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
@@ -908,6 +908,7 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [wfNames, setWfNames] = useState<Record<string, string>>({});
   const [userNames, setUserNames] = useState<Record<string, string>>({});
+  const [plannedByFlow, setPlannedByFlow] = useState<Record<string, number>>({}); // reviewer run_id → # fixes the map will run
   const [error, setError] = useState<string | null>(null);
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -944,7 +945,28 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
       return i.repo === repo.name && String(i.number ?? '') === String(number);
     };
     const load = () => listRuns(token)
-      .then(all => { if (!cancelled) setRuns((all ?? []).filter(mine)); })
+      .then(async all => {
+        if (cancelled) return;
+        const ours = (all ?? []).filter(mine);
+        setRuns(ours);
+        // For each reviewer flow (a run that others were spawned by — i.e. has children,
+        // or is the pr-review that carries no fix task), read how many fixes its map WILL
+        // run, from its extract step's tasks output, so the plan (incl. not-yet-started
+        // fixers) is visible. Best-effort, one extra fetch per reviewer flow.
+        const flows = ours.filter(r => !r.inputs?.task); // pr-review has no inputs.task; fix runs do
+        const planned: Record<string, number> = {};
+        await Promise.all(flows.map(async f => {
+          try {
+            const full = await getRun(token, f.run_id);
+            const ex = (full.step_runs || []).find(s => s.step_name.split(' [')[0] === 'extract');
+            let raw: unknown = ex?.output;
+            if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { /* not json */ } }
+            let tasksStr = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>).tasks : undefined;
+            if (typeof tasksStr === 'string') { try { const arr = JSON.parse(tasksStr); if (Array.isArray(arr)) planned[f.run_id] = arr.length; } catch { /* */ } }
+          } catch { /* best-effort */ }
+        }));
+        if (!cancelled) setPlannedByFlow(planned);
+      })
       .catch(() => { /* runs are best-effort — the timeline stands without them */ });
     load();
     const iv = setInterval(load, 8000); // cheap poll; keeps the in-progress indicator live
@@ -1031,29 +1053,56 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     </Node>
   ) });
   // Workflow runs this PR triggered (via the provenance link). Each renders as a compact
-  // <workflow name> · <status> · <run id> entry — the automation visible in the PR, live
-  // (#1) as it runs and as history (#2) once done. The per-finding detail lives in the fix
-  // runs' resolution comments; the timeline entry stays terse. Running entries sort to the
-  // live end; the rest by their time so they fall after the fix commits.
-  for (const r of runs) {
+  // <workflow name> · <status> · <run id> entry. The fixers spawned by a reviewer flow are
+  // NESTED under it ("started by <flow>"), and the ones the map still WILL run — from the
+  // reviewer flow's planned count minus those already started — show as 'todo', so the whole
+  // fan-out plan is visible, not just what's begun. Running entries sort to the live end.
+  const stFor = (status: string) => status === 'completed' ? 'success'
+    : status === 'failed' || status === 'error' ? 'fail'
+    : status === 'pending' ? 'todo' : status === 'cancelled' ? 'cancelled' : status;
+  const toneFor = (st: string, running: boolean): 'green' | 'amber' | 'red' | 'dim' =>
+    st === 'success' ? 'green' : st === 'fail' ? 'red' : running ? 'amber' : 'dim';
+  const colorFor = (tone: string) => tone === 'green' ? T.green : tone === 'red' ? T.red : tone === 'amber' ? T.amber : T.dim;
+  const runNode = (r: WorkflowRun, opts?: { child?: boolean; parentName?: string }) => {
     const name = wfNames[r.workflow_id] || r.workflow_id.slice(0, 8);
     const running = r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval';
-    const st = r.status === 'completed' ? 'success'
-      : r.status === 'failed' || r.status === 'error' ? 'fail'
-      : r.status === 'pending' ? 'todo'
-      : r.status === 'cancelled' ? 'cancelled'
-      : r.status; // running / awaiting_approval / other
-    const tone: 'green' | 'amber' | 'red' | 'dim' | 'blue' =
-      st === 'success' ? 'green' : st === 'fail' ? 'red' : running ? 'amber' : 'dim';
-    const color = tone === 'green' ? T.green : tone === 'red' ? T.red : tone === 'amber' ? T.amber : T.dim;
+    const st = stFor(r.status);
+    const tone = toneFor(st, running);
+    return (
+      <div style={{ marginLeft: opts?.child ? 18 : 0 }}>
+        <Node color={colorFor(tone)}>
+          {opts?.child && <span style={{ color: T.faint }}>↳ </span>}
+          <span style={{ color: T.textHi, fontWeight: 600 }}>{name}</span>
+          <span style={{ color: T.faint }}> · </span><Pill tone={tone}>{st}</Pill>
+          <span style={{ color: T.faint }}> · {r.run_id.slice(0, 8)}</span>
+          {opts?.parentName && <span style={{ color: T.faint, fontSize: 10 }}> · started by {opts.parentName}</span>}
+        </Node>
+      </div>
+    );
+  };
+  const childrenOf = (id: string) => runs.filter(r => r.parent_run_id === id);
+  const topRuns = runs.filter(r => !r.parent_run_id || !runs.some(p => p.run_id === r.parent_run_id));
+  for (const r of topRuns) {
+    const running = r.status === 'running' || r.status === 'pending';
     const when = r.ended_at || r.started_at || r.created_at;
+    const kids = childrenOf(r.run_id);
+    const flowName = wfNames[r.workflow_id] || 'review';
+    // one timeline item per reviewer flow, carrying its nested fixers + the queued plan.
     items.push({ t: running ? Date.now() : t(when), key: 'w' + r.run_id, node: (
-      <Node color={color}>
-        <span style={{ color: T.textHi, fontWeight: 600 }}>{name}</span>
-        <span style={{ color: T.faint }}> · </span><Pill tone={tone}>{st}</Pill>
-        <span style={{ color: T.faint }}> · {r.run_id.slice(0, 8)}</span>
-        <span style={{ color: T.faint, fontSize: 10 }}> · {ago(when)}</span>
-      </Node>
+      <div>
+        {runNode(r)}
+        {kids.map(k => <div key={k.run_id}>{runNode(k, { child: true, parentName: flowName })}</div>)}
+        {(() => {
+          const planned = plannedByFlow[r.run_id];
+          const queued = planned !== undefined ? planned - kids.length : 0;
+          return queued > 0 ? (
+            <div style={{ marginLeft: 18 }}><Node color={T.dim}>
+              <span style={{ color: T.faint }}>↳ </span><Pill tone="dim">todo</Pill>
+              <span style={{ color: T.faint }}> · {queued} more auto-fix{queued === 1 ? '' : 'es'} queued by {flowName}</span>
+            </Node></div>
+          ) : null;
+        })()}
+      </div>
     ) });
   }
   if (pr.state === 'merged') items.push({ t: t(pr.updated_at), key: 'zmerged', node: (
