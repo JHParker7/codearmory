@@ -62,18 +62,21 @@ func main() {
 	gatekeeperClient = &gk.Client{URL: gatekeeperURL, Service: "wiki", HTTPClient: httpClient}
 	registry.StartKeyRotation(ctx, gatekeeperURL, "wiki", secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	// Model B: the wiki owns its repos through a bot identity; the Store mints a run-token
-	// as that bot to reach git-factory, so users need only wiki permissions.
-	botUser := os.Getenv("WIKI_BOT_USER_ID")
-	if botUser == "" {
-		slog.Error("WIKI_BOT_USER_ID is required (the git identity the wiki writes as)")
+	// Model B: the wiki owns its repos through a bot identity, and it simply IS that bot —
+	// it logs in as the bot and uses that session for git. No privileged token minting: the
+	// bot only ever touches repos in its own namespace, so an ordinary login is enough, and
+	// users still need only wiki permissions.
+	botEmail := os.Getenv("WIKI_BOT_EMAIL")
+	botPass := secret("WIKI_BOT_PASSWORD")
+	if botEmail == "" || botPass == "" {
+		slog.Error("WIKI_BOT_EMAIL and WIKI_BOT_PASSWORD are required (the bot the wiki writes as)")
 		os.Exit(1)
 	}
 	store = newGitFactoryStore(
 		envOrDefault("GIT_FACTORY_URL", "http://localhost:9002"),
 		gatekeeperURL,
-		secret("GATEKEEPER_SERVICE_KEY"),
-		botUser,
+		botEmail,
+		botPass,
 		envOrDefault("WIKI_NAMESPACE", "ops"),
 		httpClient,
 	)

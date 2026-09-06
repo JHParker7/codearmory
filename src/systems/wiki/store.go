@@ -30,15 +30,15 @@ var errNotFound = errors.New("not found")
 
 // gitFactoryStore implements Store over git-factory. Model B: the wiki service OWNS the
 // wiki repos through its own bot identity — a user never needs git-factory grants, only
-// wiki permissions (checked in the handlers). The service mints a run-token AS the bot
-// via gatekeeper's internal endpoint using its service key (the same mechanism the git
-// connector uses to mint git-factory tokens), so every wiki commit is authored by the
-// bot and no standing credential is stored.
+// wiki permissions (checked in the handlers). The wiki simply IS that bot: it logs in as
+// the bot and uses that session (cached) for git. No privileged impersonation — the bot
+// only ever acts on repos in its OWN namespace, so this needs no scoped-role minting, it
+// is just an ordinary login. Every wiki commit is authored by the bot.
 type gitFactoryStore struct {
 	gfURL     string // http://…-git-factory:9002
-	gkURL     string // gatekeeper, for minting the bot run-token
-	svcKey    string // this service's GATEKEEPER_SERVICE_KEY
-	botUser   string // the wiki bot's gatekeeper user id (owns the wiki repos)
+	gkURL     string // gatekeeper, for the bot login
+	botEmail  string // the wiki bot's login email
+	botPass   string // the wiki bot's password
 	namespace string // the namespace the bot owns, where <project>-wiki repos live
 	hc        *http.Client
 
@@ -48,34 +48,34 @@ type gitFactoryStore struct {
 	repoIDs  map[string]string // project -> git-factory repo id (cache)
 }
 
-func newGitFactoryStore(gfURL, gkURL, svcKey, botUser, namespace string, hc *http.Client) *gitFactoryStore {
-	return &gitFactoryStore{gfURL: gfURL, gkURL: gkURL, svcKey: svcKey, botUser: botUser,
+func newGitFactoryStore(gfURL, gkURL, botEmail, botPass, namespace string, hc *http.Client) *gitFactoryStore {
+	return &gitFactoryStore{gfURL: gfURL, gkURL: gkURL, botEmail: botEmail, botPass: botPass,
 		namespace: namespace, hc: hc, repoIDs: map[string]string{}}
 }
 
-// botToken mints (and caches) a gatekeeper run-token acting as the wiki bot. Re-minted
-// well before expiry; the bot identity is what authors every wiki commit.
+// botToken logs in as the wiki bot and caches the session. Refreshed well before expiry;
+// the bot's session carries exactly the bot's own grants (its own namespace), which is
+// all the wiki ever needs — so this is a plain login, not a privileged token mint.
 func (s *gitFactoryStore) botToken(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.token != "" && time.Now().Before(s.tokenExp) {
 		return s.token, nil
 	}
-	body, _ := json.Marshal(map[string]string{"user_id": s.botUser})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.gkURL+"/internal/run-tokens", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]string{"email": s.botEmail, "password": s.botPass})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.gkURL+"/login", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Service-Key", "wiki:"+s.svcKey)
 	resp, err := s.hc.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("mint bot token: gatekeeper %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return "", fmt.Errorf("wiki bot login: gatekeeper %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var out struct {
 		Token string `json:"token"`
@@ -83,7 +83,11 @@ func (s *gitFactoryStore) botToken(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", err
 	}
-	s.token, s.tokenExp = out.Token, time.Now().Add(20*time.Minute)
+	if out.Token == "" {
+		return "", fmt.Errorf("wiki bot login: empty token")
+	}
+	// Sessions last hours; cache for 30 min and re-login well before expiry.
+	s.token, s.tokenExp = out.Token, time.Now().Add(30*time.Minute)
 	return s.token, nil
 }
 

@@ -763,15 +763,17 @@ wiki:
   env:
     logLevel: info
     otelEndpoint: ""
-    # The gatekeeper user id the wiki writes AS (owns the <project>-wiki repos).
-    # Provisioned once at deploy; the wiki mints a run-token as this user to reach git.
-    botUserID: ""
-    # The namespace the bot owns, where <project>-wiki repos are created.
-    namespace: "ops"
+    # The bot account the wiki logs in AS to write project wikis (owns the <project>-wiki
+    # repos in its own namespace). Provisioned once at deploy.
+    botEmail: "wiki-bot@codearmory.local"
+    # The namespace the bot owns, where <project>-wiki repos are created (the bot's own).
+    namespace: "codearmory-wiki-bot"
   secret:
     # Must match the wiki entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
+    # The wiki bot's login password (set at provisioning, when the bot account is created).
+    botPassword: ""
   tls:
     certSecret: ""
     clientAuth: ""

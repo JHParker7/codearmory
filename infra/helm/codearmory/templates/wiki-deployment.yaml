@@ -56,9 +56,15 @@ spec:
             # bot identity, so callers need only wiki permissions).
             - name: GIT_FACTORY_URL
               value: "http://{{ $fullname }}-git-factory:{{ .Values.gitFactory.port }}"
-            # The gatekeeper user id the wiki writes AS (owns the <project>-wiki repos).
-            - name: WIKI_BOT_USER_ID
-              value: {{ .Values.wiki.env.botUserID | quote }}
+            # The wiki IS its bot: it logs in as this account and uses that session for git
+            # (model B). No privileged token minting — the bot only touches its own namespace.
+            - name: WIKI_BOT_EMAIL
+              value: {{ .Values.wiki.env.botEmail | quote }}
+            - name: WIKI_BOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-wiki
+                  key: bot-password
             # The namespace the bot owns, where <project>-wiki repos live.
             - name: WIKI_NAMESPACE
               value: {{ .Values.wiki.env.namespace | quote }}

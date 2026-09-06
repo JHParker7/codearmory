@@ -384,10 +384,11 @@ services:
       GATEKEEPER_SERVICE_KEY: wiki-local-secret
       # Content storage: git via git-factory (model B — the wiki acts as its own bot).
       GIT_FACTORY_URL: http://git-factory:9002
-      # The gatekeeper user id the wiki writes AS, and the namespace it owns. Provision
-      # the bot once, then set WIKI_BOT_USER_ID in your local env.
-      WIKI_BOT_USER_ID: ${WIKI_BOT_USER_ID:-}
-      WIKI_NAMESPACE: ${WIKI_NAMESPACE:-ops}
+      # The wiki logs in as this bot to write project wikis (model B). Provision the bot
+      # once, then set WIKI_BOT_PASSWORD in your local env.
+      WIKI_BOT_EMAIL: ${WIKI_BOT_EMAIL:-wiki-bot@codearmory.local}
+      WIKI_BOT_PASSWORD: ${WIKI_BOT_PASSWORD:-}
+      WIKI_NAMESPACE: ${WIKI_NAMESPACE:-codearmory-wiki-bot}
     ports:
       - "8110:8110"
     depends_on:
