@@ -14,6 +14,7 @@ import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logoutSession, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
 import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
+import { createProject } from '../../api/bff';
 import { shortId } from '../../utils';
 import { useOrgNames } from '../../hooks/useNames';
 
@@ -143,11 +144,13 @@ function NavItem({ to, label, badge, service, collapsed, icon, desc }: { to: str
 }
 
 /**
- * ProjectSwitcher — the sidebar control for the current project (workspace): a
- * free-text label that filters every list view (pipelines, executions, tickets,
- * repos) and tags newly-created resources. It is purely a view filter, never a
- * permission boundary. Picking "all projects" clears the filter; "+ new project"
- * sets a label that hasn't been used yet.
+ * ProjectSwitcher — the sidebar control for the current project: a first-class
+ * gatekeeper RBAC scope (not a free-text label). Picking one scopes every list
+ * view (pipelines, executions, tickets, repos, wiki, …) to that project's
+ * resources and tags newly-created ones with its slug; "all projects" clears the
+ * scope. "+ new project" CREATES a real project (the caller becomes its admin)
+ * and selects it. The list is the caller's accessible projects, each tagged with
+ * the caller's tier.
  *
  * Collapsed, it shrinks to a single indicator dot that re-expands the sidebar on
  * click (the dropdown needs the room), keeping the slim rail uncluttered.
@@ -159,24 +162,44 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   const dispatch = useAppDispatch();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const newRef = useRef<HTMLInputElement>(null);
 
-  const choose = (name: string | null) => {
-    dispatch(setCurrentProject(name));
+  const choose = (slug: string | null) => {
+    dispatch(setCurrentProject(slug));
     setOpen(false);
     setCreating('');
+    setErr('');
   };
 
-  const submitNew = () => {
-    const v = creating.trim();
-    if (v) choose(v);
+  // Create a real gatekeeper project, then select it. The typed text is the display
+  // name; the slug is normalized to the ^[a-z0-9][a-z0-9-]{0,62}$ shape the API wants.
+  const submitNew = async () => {
+    const name = creating.trim();
+    if (!name || busy) return;
+    const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+    if (!slug) { setErr('invalid project name'); return; }
+    setBusy(true); setErr('');
+    try {
+      await createProject(token as string, slug, name);
+      await dispatch(fetchKnownProjects(token as string));
+      choose(slug);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'create failed');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // Collapsed rail: a dot that hints whether a filter is active and expands the
+  // `current` is a slug; show the matching project's display name when we have it.
+  const currentLabel = known.find(p => p.slug === current)?.name || current;
+
+  // Collapsed rail: a dot that hints whether a scope is active and expands the
   // sidebar (where the full switcher lives) when clicked.
   if (collapsed) {
     return (
-      <button onClick={onExpand} title={current ? `project: ${current}` : 'all projects'}
+      <button onClick={onExpand} title={current ? `project: ${currentLabel}` : 'all projects'}
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 0', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, cursor: 'pointer', width: '100%' }}>
         <span style={{ width: 8, height: 8, borderRadius: 2, border: `1px solid ${current ? T.green : T.faint}`, background: current ? T.green : 'transparent' }} />
       </button>
@@ -189,7 +212,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
       <button onClick={() => { const next = !open; setOpen(next); if (next) dispatch(fetchKnownProjects(token)); }}
         style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: T.card, border: `1px solid ${open ? T.green : T.border}`, color: current ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, padding: '6px 9px', cursor: 'pointer', transition: 'border-color .12s' }}>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {current ? <><span style={{ color: T.green }}>◆ </span>{current}</> : 'all projects'}
+          {current ? <><span style={{ color: T.green }}>◆ </span>{currentLabel}</> : 'all projects'}
         </span>
         <span style={{ color: T.faint, fontSize: 10, flexShrink: 0 }}>{open ? '▴' : '▾'}</span>
       </button>
@@ -197,7 +220,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
       {open && (
         <>
           {/* Click-away backdrop so the dropdown closes on any outside click. */}
-          <div onClick={() => { setOpen(false); setCreating(''); }} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+          <div onClick={() => { setOpen(false); setCreating(''); setErr(''); }} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
           <div style={{ position: 'absolute', top: '100%', left: 14, right: 14, marginTop: 4, zIndex: 41, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', maxHeight: 320, overflowY: 'auto' }}>
             <button onClick={() => choose(null)}
               style={{ width: '100%', textAlign: 'left', background: !current ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${!current ? T.green : 'transparent'}`, color: !current ? T.green : T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer' }}>
@@ -205,27 +228,31 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
             </button>
             {known.length > 0 && <div style={{ height: 1, background: T.border }} />}
             {known.map(p => {
-              const active = p === current;
+              const active = p.slug === current;
               return (
-                <button key={p} onClick={() => choose(p)}
-                  style={{ width: '100%', textAlign: 'left', background: active ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${active ? T.green : 'transparent'}`, color: active ? T.textHi : T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                <button key={p.slug} onClick={() => choose(p.slug)}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, textAlign: 'left', background: active ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${active ? T.green : 'transparent'}`, color: active ? T.textHi : T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', overflow: 'hidden' }}
                   onMouseEnter={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = T.greenFaint; }}
                   onMouseLeave={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}>
-                  {active && <span style={{ color: T.green }}>◆ </span>}{p}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {active && <span style={{ color: T.green }}>◆ </span>}{p.name || p.slug}
+                  </span>
+                  {p.tier && <span style={{ color: T.faint, fontSize: 9, letterSpacing: 0.5, textTransform: 'uppercase', flexShrink: 0 }}>{p.tier}</span>}
                 </button>
               );
             })}
             <div style={{ height: 1, background: T.border }} />
             <div style={{ display: 'flex', gap: 6, padding: '8px 10px' }}>
               <input ref={newRef} value={creating} onChange={e => setCreating(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submitNew(); if (e.key === 'Escape') { setOpen(false); setCreating(''); } }}
-                placeholder="+ new project"
+                onKeyDown={e => { if (e.key === 'Enter') submitNew(); if (e.key === 'Escape') { setOpen(false); setCreating(''); setErr(''); } }}
+                placeholder="+ new project" disabled={busy}
                 style={{ flex: 1, minWidth: 0, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px', outline: 'none' }} />
-              <button onClick={submitNew} disabled={!creating.trim()}
-                style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '5px 9px', cursor: creating.trim() ? 'pointer' : 'default', opacity: creating.trim() ? 1 : 0.5 }}>
-                use
+              <button onClick={submitNew} disabled={!creating.trim() || busy}
+                style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '5px 9px', cursor: creating.trim() && !busy ? 'pointer' : 'default', opacity: creating.trim() && !busy ? 1 : 0.5 }}>
+                {busy ? '…' : 'create'}
               </button>
             </div>
+            {err && <div style={{ color: T.red, fontSize: 10, padding: '0 10px 8px' }}>{err}</div>}
           </div>
         </>
       )}
