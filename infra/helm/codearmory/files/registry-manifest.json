@@ -2503,7 +2503,7 @@
   },
   {
     "name": "wiki",
-    "url": "http://wiki:8110",
+    "url": "http://codearmory-wiki:8110",
     "description": "Project source-of-truth wiki (git-backed via the git connector)",
     "forward_auth": true,
     "service_key": "wiki-registry-local-secret",
