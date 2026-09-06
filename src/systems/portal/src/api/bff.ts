@@ -2113,6 +2113,54 @@ export interface RegisteredService {
   ui_path?: string;
 }
 
+// ── Wiki ─────────────────────────────────────────────
+// The project source-of-truth wiki. Registered as `wiki`, so every route below is
+// conductor's `/wiki/projects/{project}/...`. Content lives in git (the service is a
+// facade), so a page is metadata + a body and history is git commits.
+export type WikiPageType =
+  | 'overview' | 'architecture' | 'contract' | 'model'
+  | 'service' | 'component' | 'decision' | 'ticket';
+
+export interface WikiPageMeta {
+  id: string;
+  path: string;
+  type: WikiPageType;
+  stack?: string;
+  format: string;
+  title: string;
+  status: string;
+  version: number;
+  related?: string[];
+  updated_at: string;
+  updated_by?: string;
+}
+export interface WikiPage extends WikiPageMeta { content: string; }
+export interface WikiManifest { project: string; pages: WikiPageMeta[] | null; version_tag?: string; updated_at: string; }
+export interface WikiCommit { sha: string; subject: string; author?: string; date: string; }
+export interface WikiPagePayload {
+  type: WikiPageType; stack?: string; format?: string; title: string;
+  status?: string; content: string; related?: string[]; path?: string;
+}
+
+/** The project's page index (manifest) — the machine index used for read-scoping. */
+export async function listWikiPages(token: string, project: string): Promise<WikiManifest> {
+  return req<WikiManifest>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages`, token);
+}
+export async function getWikiPage(token: string, project: string, id: string): Promise<WikiPage> {
+  return req<WikiPage>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token);
+}
+/** Create or update a page (a new git version). */
+export async function putWikiPage(token: string, project: string, id: string, payload: WikiPagePayload): Promise<WikiPage> {
+  return req<WikiPage>('PUT', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token, payload);
+}
+export async function deleteWikiPage(token: string, project: string, id: string): Promise<void> {
+  return req<void>('DELETE', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token);
+}
+export async function getWikiHistory(token: string, project: string, id: string): Promise<WikiCommit[]> {
+  const r = await req<{ commits: WikiCommit[] }>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}/history`, token);
+  return r.commits ?? [];
+}
+
 /** Fetch conductor's live routing table (the services currently registered/routable), flattened to the bare array. */
 export async function listRegisteredServices(token: string): Promise<RegisteredService[]> {
   const res = await req<{ services: RegisteredService[] }>('GET', '/services', token);

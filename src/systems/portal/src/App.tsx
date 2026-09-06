@@ -26,6 +26,7 @@ import { ServiceFrame } from './pages/app/ServiceFrame';
 import { Audit } from './pages/app/Audit';
 import { Settings } from './pages/app/Settings';
 import { BlacksmithRoles } from './pages/app/BlacksmithRoles';
+import { Wiki } from './pages/app/Wiki';
 import { T } from './theme';
 
 /** Full-screen terminal-styled loading splash shown while a route guard awaits an async check. */
@@ -133,6 +134,7 @@ export function App() {
             <Route path="workflows" element={<Workflows />} />
             <Route path="workflows/runs/:runId" element={<RunView />} />
             <Route path="tickets" element={<Tickets />} />
+            <Route path="wiki" element={<Wiki />} />
             <Route path="events" element={<Events />} />
             <Route path="containers" element={<Containers />} />
             <Route path="git" element={<Git />} />

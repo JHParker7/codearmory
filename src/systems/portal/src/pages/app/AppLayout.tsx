@@ -28,6 +28,7 @@ const ROUTE_SERVICE: Record<string, string> = {
   forge: 'forge',
   workflows: 'workflows',
   tickets: 'tickets',
+  wiki: 'wiki',
   events: 'events',
   containers: 'containers',
   git: 'git_connector',
@@ -44,7 +45,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 const BUNDLED_SERVICES = new Set<string>([
   'forge', 'workflows', 'events', 'gatekeeper', 'builder',
   'tickets', 'git_connector', 'containers', 'outpost-gateway',
-  'codearmory_git_factory', 'blacksmith',
+  'codearmory_git_factory', 'blacksmith', 'wiki',
 ]);
 
 /**
@@ -378,6 +379,7 @@ export function AppLayout() {
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
+            <NavItem to="/app/wiki" label="wiki/" desc="Project source of truth (git-backed)" service="wiki" collapsed={navCollapsed} icon="tickets" />
             {/* The git host, under the name people came for. Its route stays the
                 registry name so existing links keep working. */}
             <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navCollapsed} icon="git" />
