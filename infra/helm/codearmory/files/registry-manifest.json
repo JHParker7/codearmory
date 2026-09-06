@@ -2500,5 +2500,91 @@
         ]
       }
     ]
+  },
+  {
+    "name": "wiki",
+    "url": "http://wiki:8110",
+    "description": "Project source-of-truth wiki (git-backed via the git connector)",
+    "forward_auth": true,
+    "service_key": "wiki-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/projects/{project}/pages",
+        "action": "listPage",
+        "resource": "{project}/wiki/pages"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/{project}/manifest",
+        "action": "listPage",
+        "resource": "{project}/wiki/pages"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/{project}/pages/{id}",
+        "action": "getPage",
+        "resource": "{project}/wiki/pages/{id}"
+      },
+      {
+        "method": "PUT",
+        "path": "/projects/{project}/pages/{id}",
+        "action": "writePage",
+        "resource": "{project}/wiki/pages/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/projects/{project}/pages/{id}",
+        "action": "deletePage",
+        "resource": "{project}/wiki/pages/{id}"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/{project}/pages/{id}/history",
+        "action": "getPage",
+        "resource": "{project}/wiki/pages/{id}"
+      }
+    ],
+    "actions": [
+      {
+        "name": "wiki/put-page",
+        "summary": "Create or update a wiki page (with: project, id, type, stack, format, title, content)",
+        "method": "PUT",
+        "path": "/projects/{project}/pages/{id}"
+      },
+      {
+        "name": "wiki/get-page",
+        "summary": "Read a wiki page (with: project, id)",
+        "method": "GET",
+        "path": "/projects/{project}/pages/{id}"
+      },
+      {
+        "name": "wiki/list-pages",
+        "summary": "List a project's wiki manifest (with: project)",
+        "method": "GET",
+        "path": "/projects/{project}/pages"
+      },
+      {
+        "name": "wiki/delete-page",
+        "summary": "Delete a wiki page (with: project, id)",
+        "method": "DELETE",
+        "path": "/projects/{project}/pages/{id}"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "writePage",
+          "getPage",
+          "listPage",
+          "deletePage"
+        ],
+        "resources": [
+          "{username}/wiki/pages",
+          "{username}/wiki/pages/*"
+        ]
+      }
+    ]
   }
 ]
