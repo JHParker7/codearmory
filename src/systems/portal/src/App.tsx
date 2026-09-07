@@ -4,7 +4,7 @@
  * each sidebar module to its page. The guards below decide where an unauthenticated,
  * authenticated, or not-yet-bootstrapped visitor lands.
  */
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, Outlet } from 'react-router-dom';
 import { useAppSelector } from './store/hooks';
 import { Login } from './pages/Login';
 import { Signup } from './pages/Signup';
@@ -97,9 +97,26 @@ const LANDING_MODULES: { path: string; service: string }[] = [
 function DefaultAppRoute() {
   const registered = useAppSelector(s => s.auth.registeredServices);
   const resolved = useAppSelector(s => s.auth.servicesResolved);
+  const project = useAppSelector(s => s.project.current);
   if (!resolved) return <Loading />;
+  // The portal is project-scoped: with no project chosen, land on the projects
+  // page (the front door) so the user picks or creates one before entering a
+  // resource view — like choosing a repo/group in other DevOps platforms.
+  if (!project) return <Navigate to="projects" replace />;
   const first = registered ? LANDING_MODULES.find(m => registered.includes(m.service)) : undefined;
   return <Navigate to={first ? first.path : 'gatekeeper'} replace />;
+}
+
+/**
+ * Gate for the resource modules: they show a single project's resources, so a
+ * project must be selected to enter them. With none chosen, bounce to the
+ * projects page. Admin/account pages (gatekeeper, projects, builder, audit,
+ * settings) are intentionally NOT behind this gate — they are project-independent.
+ */
+function ProjectGate() {
+  const project = useAppSelector(s => s.project.current);
+  if (!project) return <Navigate to="/app/projects" replace />;
+  return <Outlet />;
 }
 
 /**
@@ -130,19 +147,23 @@ export function App() {
           <Route path="/signup" element={<RedirectIfAuthed><Signup /></RedirectIfAuthed>} />
           <Route path="/app" element={<RequireAuth><AppLayout /></RequireAuth>}>
             <Route index element={<DefaultAppRoute />} />
-            <Route path="forge" element={<Forge />} />
-            <Route path="workflows" element={<Workflows />} />
-            <Route path="workflows/runs/:runId" element={<RunView />} />
-            <Route path="tickets" element={<Tickets />} />
-            <Route path="wiki" element={<Wiki />} />
-            <Route path="events" element={<Events />} />
-            <Route path="containers" element={<Containers />} />
-            <Route path="git" element={<Git />} />
-            {/* The git host keeps its registry-name path: /app/codearmory_git_factory
-                is what the sidebar, existing links and bookmarks already point at —
-                only what renders there changed (bundled page, no longer an iframe). */}
-            <Route path="codearmory_git_factory" element={<Repos />} />
-            <Route path="outposts" element={<Outposts />} />
+            {/* Resource modules: scoped to the selected project, so gated on one
+                being chosen (ProjectGate bounces to /app/projects otherwise). */}
+            <Route element={<ProjectGate />}>
+              <Route path="forge" element={<Forge />} />
+              <Route path="workflows" element={<Workflows />} />
+              <Route path="workflows/runs/:runId" element={<RunView />} />
+              <Route path="tickets" element={<Tickets />} />
+              <Route path="wiki" element={<Wiki />} />
+              <Route path="events" element={<Events />} />
+              <Route path="containers" element={<Containers />} />
+              <Route path="git" element={<Git />} />
+              {/* The git host keeps its registry-name path: /app/codearmory_git_factory
+                  is what the sidebar, existing links and bookmarks already point at —
+                  only what renders there changed (bundled page, no longer an iframe). */}
+              <Route path="codearmory_git_factory" element={<Repos />} />
+              <Route path="outposts" element={<Outposts />} />
+            </Route>
             <Route path="gatekeeper" element={<Gatekeeper />} />
             <Route path="projects" element={<Projects />} />
             <Route path="builder" element={<Builder />} />

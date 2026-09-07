@@ -10,10 +10,12 @@
  * /api/* to conductor; auth token comes from the redux auth store.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
-import { useAppSelector } from '../../store/hooks';
+import { useAppSelector, useAppDispatch } from '../../store/hooks';
+import { setCurrentProject } from '../../store/projectSlice';
 import {
   listAccessibleProjects, createProject, deleteProject,
   addProjectMember, removeProjectMember, listRoleMembers,
@@ -57,6 +59,16 @@ interface Member {
 export function Projects() {
   const token = useAppSelector(s => s.auth.token)!;
   const currentUserId = useAppSelector(s => s.auth.user?.user_id);
+  const currentProject = useAppSelector(s => s.project.current);
+  const dispatch = useAppDispatch();
+  const navigate = useNavigate();
+
+  // Enter a project: make it the active scope and go to the app, which lands on
+  // the first resource module — now showing only this project's resources.
+  const openProject = (p: Project) => {
+    dispatch(setCurrentProject(p.slug));
+    navigate('/app');
+  };
   const userNames = useUserNames(token);
   const allUsers = useUsers(token);
 
@@ -265,6 +277,17 @@ export function Projects() {
                 <div style={{ fontFamily: T.mono, fontSize: 13, color: T.dim }}>{selectedProject.slug}</div>
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {currentProject === selectedProject.slug ? (
+                  <button onClick={() => navigate('/app')}
+                    style={{ background: T.greenSoft, border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '6px 14px', cursor: 'pointer' }}>
+                    ✓ current · enter →
+                  </button>
+                ) : (
+                  <button onClick={() => openProject(selectedProject)}
+                    style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '6px 16px', cursor: 'pointer' }}>
+                    [ open project ]
+                  </button>
+                )}
                 {selectedProject.tier && <Pill tone={tierTone(selectedProject.tier)}>{selectedProject.tier}</Pill>}
                 {isOwned && (
                   <button onClick={() => handleDelete(selectedProject)}
