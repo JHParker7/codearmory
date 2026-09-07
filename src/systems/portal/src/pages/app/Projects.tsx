@@ -272,17 +272,6 @@ export function Projects() {
           <div style={{ flex: '1 1 240px', minWidth: 240 }}>
             {sideList('organisations', orgs.map(o => ({ key: o.org_id, primary: o.org_name, secondary: o.owner_id === currentUserId ? 'owner' : 'member' })), 'None.')}
             {sideList('teams', teams.map(t => ({ key: t.team_id, primary: t.team_name, secondary: t.owner_id === currentUserId ? 'owner' : 'member' })), 'None.')}
-            {/* People isn't a full user list — that doesn't scale on a big instance.
-                The directory (search/paginate) lives in Settings → users & roles. */}
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 }}>people</div>
-              <button onClick={() => navigate('/app/settings?tab=users')}
-                style={{ width: '100%', textAlign: 'left', background: T.card, border: `1px solid ${T.border}`, borderRadius: 6, padding: '9px 11px', cursor: 'pointer', color: T.dim, fontFamily: T.mono, fontSize: 12.5 }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.green; (e.currentTarget as HTMLButtonElement).style.color = T.textHi; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-                browse the user directory →
-              </button>
-            </div>
           </div>
         </div>
       </div>
