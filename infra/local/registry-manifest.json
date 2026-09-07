@@ -2574,27 +2574,27 @@
       },
       {
         "method": "GET",
-        "path": "/projects/{project}/pages/{id}",
+        "path": "/projects/{project}/pages/{page}",
         "action": "getPage",
-        "resource": "project/{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{page}"
       },
       {
         "method": "PUT",
-        "path": "/projects/{project}/pages/{id}",
+        "path": "/projects/{project}/pages/{page}",
         "action": "writePage",
-        "resource": "project/{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{page}"
       },
       {
         "method": "DELETE",
-        "path": "/projects/{project}/pages/{id}",
+        "path": "/projects/{project}/pages/{page}",
         "action": "deletePage",
-        "resource": "project/{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{page}"
       },
       {
         "method": "GET",
-        "path": "/projects/{project}/pages/{id}/history",
+        "path": "/projects/{project}/pages/{page}/history",
         "action": "getPage",
-        "resource": "project/{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{page}"
       }
     ],
     "actions": [
@@ -2602,13 +2602,13 @@
         "name": "wiki/put-page",
         "summary": "Create or update a wiki page (with: project, id, type, stack, format, title, content)",
         "method": "PUT",
-        "path": "/projects/{project}/pages/{id}"
+        "path": "/projects/{project}/pages/{page}"
       },
       {
         "name": "wiki/get-page",
         "summary": "Read a wiki page (with: project, id)",
         "method": "GET",
-        "path": "/projects/{project}/pages/{id}"
+        "path": "/projects/{project}/pages/{page}"
       },
       {
         "name": "wiki/list-pages",
@@ -2620,7 +2620,7 @@
         "name": "wiki/delete-page",
         "summary": "Delete a wiki page (with: project, id)",
         "method": "DELETE",
-        "path": "/projects/{project}/pages/{id}"
+        "path": "/projects/{project}/pages/{page}"
       }
     ],
     "default_grants": []

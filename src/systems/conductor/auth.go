@@ -364,6 +364,12 @@ func paramTypeFor(name string) string {
 	// them here would start 400ing pulls.
 	case "ns", "username", "workspace", "org", "team":
 		return "slug"
+	// "page" is the wiki page id — a slug, not a UUID, and (like "ns") it is
+	// interpolated straight into the RBAC resource string, so validate it as a slug
+	// for the same cache-consistency reason. Named "page" precisely so it does not
+	// collide with the UUID-typed "id" every other service uses.
+	case "page":
+		return "slug"
 	}
 	return ""
 }
