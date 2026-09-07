@@ -311,16 +311,17 @@ export function AppLayout() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  // The sidebar nav only appears once a project is selected — before that the
+  // portal shows the project picker (front door) with just a slim top bar.
+  const currentProject = useAppSelector(s => s.project.current);
 
-  // Sidebar minimise — collapses to a slim icon rail to hand the main pane more
-  // width. Persisted so the choice sticks across reloads.
-  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('nav.collapsed') === '1');
-  useEffect(() => { localStorage.setItem('nav.collapsed', navCollapsed ? '1' : '0'); }, [navCollapsed]);
-  // Hover-peek: a minimised sidebar expands while the pointer is over it, then
-  // folds back. navMini is the effective visual state; navCollapsed is the sticky
-  // choice the toggle controls.
+  // Sidebar behaviour: minimised to a slim icon rail BY DEFAULT to hand the main
+  // pane more width, expanding while hovered. The toggle "pins" it open; the pin
+  // choice is persisted. navMini is the effective visual state.
+  const [navPinned, setNavPinned] = useState(() => localStorage.getItem('nav.pinned') === '1');
+  useEffect(() => { localStorage.setItem('nav.pinned', navPinned ? '1' : '0'); }, [navPinned]);
   const [navHover, setNavHover] = useState(false);
-  const navMini = navCollapsed && !navHover;
+  const navMini = !navPinned && !navHover;
   // When expanded, the sidebar width is user-draggable (persisted). The width
   // transition is suspended mid-drag so it tracks the cursor crisply, then restored
   // so the collapse/expand toggle still animates.
@@ -372,10 +373,25 @@ export function AppLayout() {
   };
 
   return (
-    <div ref={shellRef} style={{ display: 'flex', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
+    <div ref={shellRef} style={{ display: 'flex', flexDirection: currentProject ? 'row' : 'column', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
+      {!currentProject ? (
+        // No project chosen: hide the nav, show a slim top bar over the picker.
+        <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 18px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Logo size={18} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: T.textHi, letterSpacing: -0.2 }}>codearmory</span>
+            <span style={{ fontSize: 11, color: T.faint, marginLeft: 6 }}>· select a project to begin</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <NavLink to="/app/settings" style={{ color: T.dim, fontFamily: T.mono, fontSize: 12, textDecoration: 'none', border: `1px solid ${T.border}`, padding: '5px 10px' }}>settings/</NavLink>
+            <button onClick={handleLogout} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '5px 10px', cursor: 'pointer' }}>[ ./logout ]</button>
+          </div>
+        </header>
+      ) : (
+      <>
       {/* Sidebar */}
       <aside onMouseEnter={() => setNavHover(true)} onMouseLeave={() => setNavHover(false)}
-        style={{ width: navMini ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease', zIndex: navCollapsed && navHover ? 30 : undefined }}>
+        style={{ width: navMini ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease', zIndex: navHover && !navPinned ? 30 : undefined }}>
         {/* Logo + minimise toggle */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: navMini ? 'center' : 'space-between', gap: 10, padding: navMini ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
           {!navMini && (
@@ -384,11 +400,11 @@ export function AppLayout() {
               <span style={{ fontSize: 13, fontWeight: 700, color: T.textHi, letterSpacing: -0.2 }}>codearmory</span>
             </div>
           )}
-          <button onClick={() => setNavCollapsed(c => !c)} title={navCollapsed ? 'expand sidebar' : 'minimise sidebar'}
+          <button onClick={() => setNavPinned(p => !p)} title={navPinned ? 'auto-hide sidebar' : 'pin sidebar open'}
             style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: '4px 7px', cursor: 'pointer', transition: 'border-color .12s, color .12s' }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.green; (e.currentTarget as HTMLButtonElement).style.color = T.green; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-            {navCollapsed ? '»' : '«'}
+            {navPinned ? '«' : '»'}
           </button>
         </div>
 
@@ -403,7 +419,7 @@ export function AppLayout() {
         )}
 
         {/* Project switcher — current-project view filter (or a slim indicator when collapsed). */}
-        <ProjectSwitcher collapsed={navMini} onExpand={() => setNavCollapsed(false)} />
+        <ProjectSwitcher collapsed={navMini} onExpand={() => setNavPinned(true)} />
 
         {/* Nav — each section header doubles as a per-section minimise toggle when the
             sidebar is expanded; the slim rail shows every section's items as-is. */}
@@ -438,18 +454,15 @@ export function AppLayout() {
               <NavItem key={svc} to={`/app/${svc}`} label={`${svc}/`} desc={SERVICE_DESC[svc]} service={svc} collapsed={navMini} />
             ))}
           </NavSection>
-          <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="admin" sidebarCollapsed={navMini} defaultCollapsed>
-            {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" desc="Deploy & configure services" collapsed={navMini} icon="builder" />}
-            {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" desc="Who changed what, and when" collapsed={navMini} icon="audit" />}
-            <NavItem to="/app/projects" label="projects/" desc="Group resources & grant access" collapsed={navMini} icon="projects" />
-            <NavItem to="/app/gatekeeper" label="gatekeeper/" desc="Access control — users & roles" collapsed={navMini} icon="gatekeeper" />
-          </NavSection>
-          <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="account" sidebarCollapsed={navMini} defaultCollapsed>
-            <NavItem to="/app/settings" label="settings/" desc="Theme, account & preferences" collapsed={navMini} icon="settings" />
-          </NavSection>
+          {/* admin & account (gatekeeper, users/roles, projects, builder, audit,
+              preferences) are NOT project resources — they live on the Settings
+              page reached from the footer link below, keeping the nav to a
+              project's own resources. */}
         </nav>
+
+        {/* Settings link — the home for the non-project admin/account pages — sits
+            just above logout. */}
+        <NavItem to="/app/settings" label="settings/" desc="Users, roles, projects, admin & preferences" collapsed={navMini} icon="settings" />
 
         {/* Logout */}
         <div style={{ padding: navMini ? '10px 8px' : '10px 14px', borderTop: `1px solid ${T.border}` }}>
@@ -463,7 +476,9 @@ export function AppLayout() {
       </aside>
 
       {/* Drag to resize the sidebar (only while expanded). */}
-      {!navCollapsed && navHandle}
+      {navPinned && navHandle}
+      </>
+      )}
 
       {/* Main content */}
       <main style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
