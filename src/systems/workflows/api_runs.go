@@ -200,20 +200,22 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 	}
 
 	run := WorkflowRun{
-		RunID:        uuid.New().String(),
-		WorkflowID:   wf.WorkflowID,
-		TriggeredBy:  userID,
-		OrgID:        orgID,
-		Project:      wf.Project,
-		Status:       StatusPending,
-		Inputs:       inputs,
-		Depth:        depth,
-		ParentRunID:  parentRunID,
-		Token:        encToken,
-		RunSessionID: sessionID,
-		RoleID:       wf.RoleID,
-		StepRuns:     []WorkflowStepRun{},
-		CreatedAt:    time.Now().UTC(),
+		RunID:            uuid.New().String(),
+		WorkflowID:       wf.WorkflowID,
+		TriggeredBy:      userID,
+		OrgID:            orgID,
+		Project:          wf.Project,
+		ProjectID:        wf.ProjectID,
+		ProjectNamespace: wf.ProjectNamespace,
+		Status:           StatusPending,
+		Inputs:           inputs,
+		Depth:            depth,
+		ParentRunID:      parentRunID,
+		Token:            encToken,
+		RunSessionID:     sessionID,
+		RoleID:           wf.RoleID,
+		StepRuns:         []WorkflowStepRun{},
+		CreatedAt:        time.Now().UTC(),
 	}
 	if err := run.Add(ctx); err != nil {
 		slog.ErrorContext(ctx, "trigger run: db error", "workflow_id", wf.WorkflowID, "user_id", userID, "error", err)

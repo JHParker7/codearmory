@@ -118,16 +118,18 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	run := WorkflowRun{
-		RunID:        uuid.New().String(),
-		WorkflowID:   wf.WorkflowID,
-		TriggeredBy:  req.TriggeredBy,
-		OrgID:        wf.OrgID,
-		Project:      wf.Project,
-		Status:       StatusPending,
-		Inputs:       req.Inputs,
-		Token:        encToken,
-		RunSessionID: sessionID,
-		CreatedAt:    time.Now().UTC(),
+		RunID:            uuid.New().String(),
+		WorkflowID:       wf.WorkflowID,
+		TriggeredBy:      req.TriggeredBy,
+		OrgID:            wf.OrgID,
+		Project:          wf.Project,
+		ProjectID:        wf.ProjectID,
+		ProjectNamespace: wf.ProjectNamespace,
+		Status:           StatusPending,
+		Inputs:           req.Inputs,
+		Token:            encToken,
+		RunSessionID:     sessionID,
+		CreatedAt:        time.Now().UTC(),
 	}
 
 	if err := run.Add(ctx); err != nil {

@@ -52,14 +52,39 @@ func getArtifact(ctx context.Context, userID, name string) (Artifact, error) {
 	return a, err
 }
 
-// listArtifacts returns a user's artifacts, newest first.
-func listArtifacts(ctx context.Context, userID string) ([]Artifact, error) {
+// listArtifacts returns the artifacts a caller may see, newest first: their own, plus
+// any filed into a project they can reach (projectIDs). An optional project slug narrows
+// the view to that one project — a view filter, not a security boundary. Mirrors forge's
+// listExecutions.
+func listArtifacts(ctx context.Context, userID, project string, projectIDs []string) ([]Artifact, error) {
 	var out []Artifact
-	err := connect().WithContext(ctx).Where("user_id=?", userID).Order("updated_at DESC").Limit(500).Find(&out).Error
+	q := connect().WithContext(ctx).Order("updated_at DESC").Limit(500)
+	// Widen to artifacts in any project the caller can reach; otherwise owner-only.
+	if len(projectIDs) > 0 {
+		q = q.Where("user_id = ? OR project_id IN ?", userID, projectIDs)
+	} else {
+		q = q.Where("user_id = ?", userID)
+	}
+	// Project is an optional view filter, not a security boundary.
+	if project != "" {
+		q = q.Where("project = ?", project)
+	}
+	err := q.Find(&out).Error
 	if out == nil {
 		out = []Artifact{}
 	}
 	return out, err
+}
+
+// getArtifactInProject loads an artifact by (project, name), used to reach an artifact a
+// caller does not own but may access as a project member. A name is unique per user, not
+// per project, so this returns the FIRST match — the disambiguation the caller cares
+// about is which project, which they named; a duplicate name across two owners in one
+// project is not a case this store distinguishes.
+func getArtifactInProject(ctx context.Context, projectID, name string) (Artifact, error) {
+	var a Artifact
+	err := connect().WithContext(ctx).Where("project_id=? AND name=?", projectID, name).First(&a).Error
+	return a, err
 }
 
 // upsertArtifact records a stored blob, replacing any same-named one. Uploading a
@@ -79,11 +104,14 @@ func upsertArtifact(ctx context.Context, a Artifact) error {
 	return connect().WithContext(ctx).Model(&Artifact{}).
 		Where("artifact_id=?", existing.ArtifactID).
 		Updates(map[string]any{
-			"size_bytes":   a.SizeBytes,
-			"content_type": a.ContentType,
-			"sha256":       a.SHA256,
-			"org_id":       a.OrgID,
-			"updated_at":   time.Now().UTC(),
+			"size_bytes":        a.SizeBytes,
+			"content_type":      a.ContentType,
+			"sha256":            a.SHA256,
+			"org_id":            a.OrgID,
+			"project":           a.Project,
+			"project_id":        a.ProjectID,
+			"project_namespace": a.ProjectNamespace,
+			"updated_at":        time.Now().UTC(),
 		}).Error
 }
 

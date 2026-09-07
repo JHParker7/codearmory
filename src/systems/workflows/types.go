@@ -533,14 +533,21 @@ func (Workflow) TableName() string { return "workflows" }
 // it is never the triggering user's own session token. RunSessionID tracks the
 // underlying gatekeeper session so it can be revoked on terminal state.
 type WorkflowRun struct {
-	RunID       string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
-	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
-	TriggeredBy string            `json:"triggered_by" gorm:"column:triggered_by"`
-	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
-	Project     string            `json:"project,omitempty" gorm:"column:project;default:''"`
-	Status      string            `json:"status"       gorm:"column:status;default:'pending'"`
-	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
-	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
+	RunID       string `json:"run_id"       gorm:"column:run_id;primaryKey"`
+	WorkflowID  string `json:"workflow_id"  gorm:"column:workflow_id"`
+	TriggeredBy string `json:"triggered_by" gorm:"column:triggered_by"`
+	OrgID       string `json:"org_id"       gorm:"column:org_id;default:''"`
+	Project     string `json:"project,omitempty" gorm:"column:project;default:''"`
+	// ProjectID/ProjectNamespace are copied from the parent Workflow at trigger time,
+	// carrying the resolved project scope onto the run: ProjectID lets list views
+	// widen to a project's members cheaply, ProjectNamespace is the owner namespace a
+	// member's project grant must be qualified with. Both empty ⇒ Project is a plain
+	// label. Added by AutoMigrate; existing rows read back empty.
+	ProjectID        string            `json:"project_id,omitempty"        gorm:"column:project_id;default:''"`
+	ProjectNamespace string            `json:"project_namespace,omitempty" gorm:"column:project_namespace;default:''"`
+	Status           string            `json:"status"       gorm:"column:status;default:'pending'"`
+	CurrentStep      int               `json:"current_step" gorm:"column:current_step;default:0"`
+	Inputs           map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
 	// Outputs is the resolved pipeline-output map, computed from the declared
 	// WorkflowOutputDefs when the run completes; empty until then. Surfaced to a
 	// parent run as the workflows/trigger step's output.

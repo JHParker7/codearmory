@@ -66,6 +66,40 @@ func inOwnNamespace(resource, username, orgNS string) bool {
 	return orgNS != "" && strings.HasPrefix(resource, orgNS+"/")
 }
 
+// inMemberProject reports whether resource sits inside the "project/<slug>/…"
+// namespace of a project the caller belongs to. A project is a top-level namespace
+// of its own, exactly like "org/<name>/…" — scopeResource already leaves such
+// resources un-rescoped — so a member may grant within it, letting a project owner
+// or member mint a scoped token confined to that project's resources.
+//
+// The membership check is what keeps this from widening confinement: a non-member
+// gets false and the resource is refused just as any other namespace they do not
+// own. isProjectMember admits owner and any tier (viewer/developer/admin) — the same
+// "can VIEW" set the rest of the project surface uses; attenuation still bars
+// granting any action the caller does not personally hold, so a viewer cannot pass
+// on write.
+func inMemberProject(ctx context.Context, callerID, resource string) bool {
+	rest, ok := strings.CutPrefix(resource, "project/")
+	if !ok {
+		return false
+	}
+	// The slug must be a COMPLETE segment followed by a resource inside it, so
+	// "project/core" (the bare namespace) and a slug that is merely a prefix of a
+	// longer one are both refused — mirroring inOwnNamespace's segment guard.
+	slug, tail, ok := strings.Cut(rest, "/")
+	if !ok || slug == "" || tail == "" {
+		return false
+	}
+	// getProjectBySlug spans inactive rows (its unique index covers soft-deleted
+	// projects), so an explicit Active check is required — a deleted project's slug
+	// must not grant confinement.
+	p, err := getProjectBySlug(ctx, slug)
+	if err != nil || !p.Active {
+		return false
+	}
+	return isProjectMember(ctx, callerID, p)
+}
+
 // attenuationError is a refusal with the status the caller should see. Confinement and
 // attenuation failures are 403 (you asked for something you may not have), a malformed
 // spec is 400, and a failed lookup is 500 — kept distinct because "you cannot grant
@@ -90,8 +124,9 @@ func attenuatedPermissions(ctx context.Context, callerID, username, orgNS, nameP
 		if p.Service == "" || p.Action == "" || p.Resource == "" {
 			return nil, &attenuationError{http.StatusBadRequest, "each permission needs service, action and resource"}
 		}
-		// CONFINEMENT: the resource must sit in a namespace the caller owns.
-		if !inOwnNamespace(p.Resource, username, orgNS) {
+		// CONFINEMENT: the resource must sit in a namespace the caller owns, or in the
+		// "project/<slug>/…" namespace of a project they are a member of.
+		if !inOwnNamespace(p.Resource, username, orgNS) && !inMemberProject(ctx, callerID, p.Resource) {
 			return nil, &attenuationError{http.StatusForbidden, "resource " + p.Resource + " is outside your namespace"}
 		}
 		// ATTENUATION: you may only pass on what you hold.

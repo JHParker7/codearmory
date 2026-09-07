@@ -143,11 +143,27 @@ func handleCreateVolume(reg *runtimeRegistry) http.HandlerFunc {
 			Name:         req.Name,
 			UserID:       userID,
 			OrgID:        orgID,
+			Project:      req.Project,
 			Backend:      backend,
 			SizeMB:       req.SizeMB,
 			Medium:       req.Medium,
 			MountPath:    req.MountPath,
 			Status:       volumeStatusActive,
+		}
+		// Mirror the lease create path: a project slug that resolves to a real
+		// gatekeeper project widens access to its members and stamps the id/namespace;
+		// an unresolved slug stays a free-text label, owner-scoped as before.
+		if req.Project != "" {
+			bearer := r.Header.Get("Authorization")
+			if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
+				if !checkProjectPermission(ctx, bearer, "createVolume", "volumes", p.Slug, "") {
+					span.SetStatus(codes.Ok, "")
+					http.Error(w, "you cannot create volumes in project "+p.Slug, http.StatusForbidden)
+					return
+				}
+				vol.ProjectID = p.ProjectID
+				vol.ProjectNamespace = p.Namespace
+			}
 		}
 		if err := vol.Add(ctx); err != nil {
 			// Lost a race with a concurrent identical create (deterministic resource
