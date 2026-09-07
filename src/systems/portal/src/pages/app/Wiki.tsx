@@ -20,7 +20,7 @@ import type { WikiPageMeta, WikiPageType, WikiPagePayload } from '../../api/bff'
 
 const TYPES: WikiPageType[] = ['overview', 'architecture', 'contract', 'model', 'service', 'component', 'decision', 'ticket'];
 const STACKS = ['shared', 'frontend', 'backend', 'infra'];
-const FORMATS = ['md', 'openapi', 'sql', 'ts', 'yaml'];
+const FORMATS = ['md', 'openapi', 'sql', 'ts', 'yaml', 'html'];
 
 const box: React.CSSProperties = { background: 'transparent', border: `1px solid ${T.border}`, color: T.text, padding: '6px 8px', borderRadius: 4, fontSize: 13, fontFamily: 'inherit' };
 const btn: React.CSSProperties = { background: T.cardHi, border: `1px solid ${T.border}`, color: T.textHi, padding: '5px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontFamily: T.mono };
@@ -199,9 +199,17 @@ export function Wiki() {
                 <button onClick={del} disabled={busy} style={{ ...btn, background: T.redSoft, color: T.red, borderColor: T.red }}>delete</button>
               </div>
             </div>
-            {draft.format === 'md'
-              ? <Markdown source={draft.content} />
-              : <pre style={{ background: T.bgAlt, border: `1px solid ${T.border}`, borderRadius: 4, padding: '12px 14px', overflow: 'auto', fontFamily: T.mono, fontSize: 12, lineHeight: 1.55, color: T.text, whiteSpace: 'pre-wrap' }}>{draft.content}</pre>}
+            {draft.format === 'md' ? (
+              <Markdown source={draft.content} />
+            ) : draft.format === 'html' ? (
+              // Archify diagram: a self-contained HTML doc. Render it isolated in a
+              // sandboxed iframe (scripts allowed, but no same-origin — no access to
+              // the portal's cookies/DOM) so an untrusted diagram can't reach out.
+              <iframe title={draft.title} srcDoc={draft.content} sandbox="allow-scripts"
+                style={{ width: '100%', height: '72vh', border: `1px solid ${T.border}`, borderRadius: 4, background: '#fff' }} />
+            ) : (
+              <pre style={{ background: T.bgAlt, border: `1px solid ${T.border}`, borderRadius: 4, padding: '12px 14px', overflow: 'auto', fontFamily: T.mono, fontSize: 12, lineHeight: 1.55, color: T.text, whiteSpace: 'pre-wrap' }}>{draft.content}</pre>
+            )}
           </div>
         ) : (
           // Contents root
