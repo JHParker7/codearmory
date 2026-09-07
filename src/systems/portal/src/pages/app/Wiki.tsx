@@ -28,9 +28,10 @@ const emptyDraft: Draft = { id: '', type: 'overview', stack: 'shared', format: '
 export function Wiki() {
   const token = useAppSelector(s => s.auth.token)!;
   const [confirm, confirmEl] = useConfirm();
-  const [project, setProject] = useUrlParam('project');
+  // The project is the globally-selected one from the sidebar switcher — the wiki
+  // is one more project-scoped view, not its own separate namespace picker.
+  const project = useAppSelector(s => s.project.current);
   const [pageId, setPageId] = useUrlParam('page');
-  const [projInput, setProjInput] = useState(project ?? '');
   const [pages, setPages] = useState<WikiPageMeta[]>([]);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [history, setHistory] = useState<WikiCommit[]>([]);
@@ -61,7 +62,6 @@ export function Wiki() {
     })();
   }, [token, project, pageId]);
 
-  const openProject = () => { const p = projInput.trim(); if (p) { setProject(p); setPageId(null); setDraft(emptyDraft); setHistory([]); } };
   const newPage = () => { setCreating(true); setPageId(null); setDraft(emptyDraft); setHistory([]); };
 
   const save = async () => {
@@ -94,11 +94,11 @@ export function Wiki() {
       <h1 style={{ fontSize: 18, color: T.textHi, marginBottom: 4 }}>wiki/</h1>
       <p style={{ color: T.dim, fontSize: 13, marginBottom: 16 }}>A project's source of truth — architecture, API contracts, data models, decisions. Git-backed; every save is a commit.</p>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <input value={projInput} onChange={e => setProjInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && openProject()}
-          placeholder="project (namespace)" style={{ ...box, minWidth: 220 }} />
-        <button onClick={openProject} style={btn}>open</button>
-      </div>
+      {!project && (
+        <div style={{ color: T.dim, fontSize: 13, padding: '10px 0 4px' }}>
+          Select a project from the sidebar to view its wiki.
+        </div>
+      )}
 
       {err && <div style={{ color: T.red, background: T.redSoft, padding: '6px 10px', borderRadius: 4, marginBottom: 12, fontSize: 13 }}>{err}</div>}
 

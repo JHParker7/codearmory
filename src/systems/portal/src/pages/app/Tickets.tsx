@@ -454,6 +454,8 @@ function ColumnsModal({ statuses, boardId, boardName, onChanged, onClose }: { st
 /** Ticket kanban: first-class board switcher + status columns with drag-to-move, a detail drawer, and column config. */
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
+  // The selected project scopes the board to that project's tickets (null = all).
+  const project = useAppSelector(s => s.project.current);
   const users = useUsers(token);
   // Derive the id→username map from the same catalog the assignee picker uses, to avoid a second fetch.
   const userNames = useMemo(() => Object.fromEntries(users.map(u => [u.user_id, u.username])), [users]);
@@ -529,7 +531,7 @@ export function Tickets() {
     if (!silent) { setLoading(true); setError(null); }
     try {
       const [tk, bd] = await Promise.all([
-        listTickets(token),
+        listTickets(token, project ?? undefined),
         listBoards(token).catch(() => [] as Board[]),
       ]);
       setTickets(tk);
@@ -539,7 +541,7 @@ export function Tickets() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [token]);
+  }, [token, project]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
