@@ -40,6 +40,10 @@ export function Wiki() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [railW, railHandle] = useResizableWidth('rail.wiki', 260, { min: 200, max: 420 });
+  // The rail stacks next to the main sidebar nav, so it folds away once you're
+  // reading a page (focused on content) and peeks back open on hover. It stays
+  // fully open on the Contents root and while editing, where you're navigating.
+  const [railHover, setRailHover] = useState(false);
 
   const loadManifest = useCallback(async (proj: string) => {
     setErr('');
@@ -91,6 +95,9 @@ export function Wiki() {
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft(d => ({ ...d, [k]: v }));
 
   const editMode = creating || editing;
+  // Minimise the rail while reading a page; keep it open on Contents/edit. Hover peeks.
+  const railMin = !!pageId && !editMode;
+  const railOpen = !railMin || railHover;
   const selected = pages.find(p => p.id === pageId);
   // Pages grouped by type, in the canonical type order, for the rail + contents.
   const groups = useMemo(
@@ -120,25 +127,34 @@ export function Wiki() {
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {confirmEl}
-      {/* Rail: contents */}
-      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', borderBottom: `1px solid ${T.border}` }}>
-          <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{project} · {pages.length} page{pages.length !== 1 ? 's' : ''}</span>
-          <button onClick={newPage} title="new page" style={{ ...btn, padding: '2px 8px' }}>+</button>
-        </div>
-        <button onClick={openContents}
-          style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: !pageId && !editMode ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${!pageId && !editMode ? T.green : 'transparent'}`, borderBottom: `1px solid ${T.border}`, color: !pageId && !editMode ? T.textHi : T.dim, cursor: 'pointer', fontFamily: T.mono, fontSize: 12 }}>
-          ▤ Contents
-        </button>
-        {groups.map(([type, ps]) => (
-          <div key={type}>
-            <div style={{ padding: '8px 12px 3px', fontFamily: T.mono, fontSize: 9, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>{type}</div>
-            {ps.map(railItem)}
+      {/* Rail: contents. Minimises to a thin strip while reading a page; hover peeks it open. */}
+      <div onMouseEnter={() => setRailHover(true)} onMouseLeave={() => setRailHover(false)}
+        style={{ width: railOpen ? railW : 30, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', flexDirection: 'column', overflow: railOpen ? 'auto' : 'hidden', transition: 'width .14s ease' }}>
+        {railOpen ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', borderBottom: `1px solid ${T.border}` }}>
+              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{project} · {pages.length} page{pages.length !== 1 ? 's' : ''}</span>
+              <button onClick={newPage} title="new page" style={{ ...btn, padding: '2px 8px' }}>+</button>
+            </div>
+            <button onClick={openContents}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: !pageId && !editMode ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${!pageId && !editMode ? T.green : 'transparent'}`, borderBottom: `1px solid ${T.border}`, color: !pageId && !editMode ? T.textHi : T.dim, cursor: 'pointer', fontFamily: T.mono, fontSize: 12 }}>
+              ▤ Contents
+            </button>
+            {groups.map(([type, ps]) => (
+              <div key={type}>
+                <div style={{ padding: '8px 12px 3px', fontFamily: T.mono, fontSize: 9, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>{type}</div>
+                {ps.map(railItem)}
+              </div>
+            ))}
+            {pages.length === 0 && <div style={{ padding: 12, color: T.faint, fontSize: 12 }}>No pages yet.</div>}
+          </>
+        ) : (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: 12, color: T.faint }} title="contents (hover to open)">
+            <span style={{ fontSize: 14 }}>▤</span>
           </div>
-        ))}
-        {pages.length === 0 && <div style={{ padding: 12, color: T.faint, fontSize: 12 }}>No pages yet.</div>}
+        )}
       </div>
-      {railHandle}
+      {railOpen && railHandle}
 
       {/* Main pane */}
       <div style={{ flex: 1, overflow: 'auto' }}>

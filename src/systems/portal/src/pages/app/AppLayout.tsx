@@ -316,6 +316,11 @@ export function AppLayout() {
   // width. Persisted so the choice sticks across reloads.
   const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('nav.collapsed') === '1');
   useEffect(() => { localStorage.setItem('nav.collapsed', navCollapsed ? '1' : '0'); }, [navCollapsed]);
+  // Hover-peek: a minimised sidebar expands while the pointer is over it, then
+  // folds back. navMini is the effective visual state; navCollapsed is the sticky
+  // choice the toggle controls.
+  const [navHover, setNavHover] = useState(false);
+  const navMini = navCollapsed && !navHover;
   // When expanded, the sidebar width is user-draggable (persisted). The width
   // transition is suspended mid-drag so it tracks the cursor crisply, then restored
   // so the collapse/expand toggle still animates.
@@ -369,10 +374,11 @@ export function AppLayout() {
   return (
     <div ref={shellRef} style={{ display: 'flex', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
       {/* Sidebar */}
-      <aside style={{ width: navCollapsed ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease' }}>
+      <aside onMouseEnter={() => setNavHover(true)} onMouseLeave={() => setNavHover(false)}
+        style={{ width: navMini ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease', zIndex: navCollapsed && navHover ? 30 : undefined }}>
         {/* Logo + minimise toggle */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: navCollapsed ? 'center' : 'space-between', gap: 10, padding: navCollapsed ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
-          {!navCollapsed && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: navMini ? 'center' : 'space-between', gap: 10, padding: navMini ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
+          {!navMini && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
               <Logo size={18} />
               <span style={{ fontSize: 13, fontWeight: 700, color: T.textHi, letterSpacing: -0.2 }}>codearmory</span>
@@ -387,7 +393,7 @@ export function AppLayout() {
         </div>
 
         {/* User */}
-        {user && !navCollapsed && (
+        {user && !navMini && (
           <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}` }}>
             <div style={{ fontSize: 11, color: T.faint, letterSpacing: 0.5, marginBottom: 4 }}>SIGNED IN AS</div>
             <div style={{ fontSize: 13, color: T.textHi, fontWeight: 600 }}>@{user.username}</div>
@@ -397,61 +403,61 @@ export function AppLayout() {
         )}
 
         {/* Project switcher — current-project view filter (or a slim indicator when collapsed). */}
-        <ProjectSwitcher collapsed={navCollapsed} onExpand={() => setNavCollapsed(false)} />
+        <ProjectSwitcher collapsed={navMini} onExpand={() => setNavCollapsed(false)} />
 
         {/* Nav — each section header doubles as a per-section minimise toggle when the
             sidebar is expanded; the slim rail shows every section's items as-is. */}
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto', overflowX: 'hidden' }}>
-          <NavSection title="tools" sidebarCollapsed={navCollapsed}>
-            <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
-            <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navCollapsed} icon="workflows" />
-            <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
-            <NavItem to="/app/wiki" label="wiki/" desc="Project source of truth (git-backed)" service="wiki" collapsed={navCollapsed} icon="tickets" />
+          <NavSection title="tools" sidebarCollapsed={navMini}>
+            <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navMini} icon="workflows" />
+            <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navMini} icon="workflows" />
+            <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navMini} icon="tickets" />
+            <NavItem to="/app/wiki" label="wiki/" desc="Project source of truth (git-backed)" service="wiki" collapsed={navMini} icon="tickets" />
             {/* The git host, under the name people came for. Its route stays the
                 registry name so existing links keep working. */}
-            <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navCollapsed} icon="git" />
+            <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navMini} icon="git" />
             {/* Pinned iframe services sit alongside the bundled tools rather than in
                 the discovered-modules list — they are day-to-day surfaces. */}
             {Object.entries(PINNED_SERVICES).map(([svc, { label, desc }]) => (
-              <NavItem key={svc} to={`/app/${svc}`} label={label} desc={desc} service={svc} collapsed={navCollapsed} icon="git" />
+              <NavItem key={svc} to={`/app/${svc}`} label={label} desc={desc} service={svc} collapsed={navMini} icon="git" />
             ))}
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="modules" sidebarCollapsed={navCollapsed} defaultCollapsed>
+          <NavSection title="modules" sidebarCollapsed={navMini} defaultCollapsed>
             {/* Labelled for what it is — a credential broker for repos hosted
                 elsewhere — so it is not mistaken for repos/, which hosts them here. */}
-            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
-            <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
-            <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navCollapsed} icon="events" />
-            <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
-            <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
+            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navMini} icon="git" />
+            <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navMini} icon="forge" />
+            <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navMini} icon="events" />
+            <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navMini} icon="containers" />
+            <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navMini} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
                 non-core service that advertises a ui_path) — discovered at runtime,
                 no per-service code. Subtitles come from SERVICE_DESC when known. */}
             {iframeServices.map(svc => (
-              <NavItem key={svc} to={`/app/${svc}`} label={`${svc}/`} desc={SERVICE_DESC[svc]} service={svc} collapsed={navCollapsed} />
+              <NavItem key={svc} to={`/app/${svc}`} label={`${svc}/`} desc={SERVICE_DESC[svc]} service={svc} collapsed={navMini} />
             ))}
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="admin" sidebarCollapsed={navCollapsed} defaultCollapsed>
-            {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" desc="Deploy & configure services" collapsed={navCollapsed} icon="builder" />}
-            {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" desc="Who changed what, and when" collapsed={navCollapsed} icon="audit" />}
-            <NavItem to="/app/projects" label="projects/" desc="Group resources & grant access" collapsed={navCollapsed} icon="projects" />
-            <NavItem to="/app/gatekeeper" label="gatekeeper/" desc="Access control — users & roles" collapsed={navCollapsed} icon="gatekeeper" />
+          <NavSection title="admin" sidebarCollapsed={navMini} defaultCollapsed>
+            {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" desc="Deploy & configure services" collapsed={navMini} icon="builder" />}
+            {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" desc="Who changed what, and when" collapsed={navMini} icon="audit" />}
+            <NavItem to="/app/projects" label="projects/" desc="Group resources & grant access" collapsed={navMini} icon="projects" />
+            <NavItem to="/app/gatekeeper" label="gatekeeper/" desc="Access control — users & roles" collapsed={navMini} icon="gatekeeper" />
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="account" sidebarCollapsed={navCollapsed} defaultCollapsed>
-            <NavItem to="/app/settings" label="settings/" desc="Theme, account & preferences" collapsed={navCollapsed} icon="settings" />
+          <NavSection title="account" sidebarCollapsed={navMini} defaultCollapsed>
+            <NavItem to="/app/settings" label="settings/" desc="Theme, account & preferences" collapsed={navMini} icon="settings" />
           </NavSection>
         </nav>
 
         {/* Logout */}
-        <div style={{ padding: navCollapsed ? '10px 8px' : '10px 14px', borderTop: `1px solid ${T.border}` }}>
-          <button onClick={handleLogout} title={navCollapsed ? 'logout' : undefined}
-            style={{ width: '100%', background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', textAlign: navCollapsed ? 'center' : 'left', letterSpacing: 0.3, transition: 'border-color .12s, color .12s' }}
+        <div style={{ padding: navMini ? '10px 8px' : '10px 14px', borderTop: `1px solid ${T.border}` }}>
+          <button onClick={handleLogout} title={navMini ? 'logout' : undefined}
+            style={{ width: '100%', background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', textAlign: navMini ? 'center' : 'left', letterSpacing: 0.3, transition: 'border-color .12s, color .12s' }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-            {navCollapsed ? '⏻' : '[ ./logout ]'}
+            {navMini ? '⏻' : '[ ./logout ]'}
           </button>
         </div>
       </aside>
