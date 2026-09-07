@@ -2512,37 +2512,37 @@
         "method": "GET",
         "path": "/projects/{project}/pages",
         "action": "listPage",
-        "resource": "{project}/wiki/pages"
+        "resource": "project/{project}/wiki/pages"
       },
       {
         "method": "GET",
         "path": "/projects/{project}/manifest",
         "action": "listPage",
-        "resource": "{project}/wiki/pages"
+        "resource": "project/{project}/wiki/pages"
       },
       {
         "method": "GET",
         "path": "/projects/{project}/pages/{id}",
         "action": "getPage",
-        "resource": "{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{id}"
       },
       {
         "method": "PUT",
         "path": "/projects/{project}/pages/{id}",
         "action": "writePage",
-        "resource": "{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{id}"
       },
       {
         "method": "DELETE",
         "path": "/projects/{project}/pages/{id}",
         "action": "deletePage",
-        "resource": "{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{id}"
       },
       {
         "method": "GET",
         "path": "/projects/{project}/pages/{id}/history",
         "action": "getPage",
-        "resource": "{project}/wiki/pages/{id}"
+        "resource": "project/{project}/wiki/pages/{id}"
       }
     ],
     "actions": [
@@ -2571,20 +2571,6 @@
         "path": "/projects/{project}/pages/{id}"
       }
     ],
-    "default_grants": [
-      {
-        "grant_on": "user",
-        "actions": [
-          "writePage",
-          "getPage",
-          "listPage",
-          "deletePage"
-        ],
-        "resources": [
-          "{username}/wiki/pages",
-          "{username}/wiki/pages/*"
-        ]
-      }
-    ]
+    "default_grants": []
   }
 ]
