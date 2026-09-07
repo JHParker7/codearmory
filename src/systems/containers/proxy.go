@@ -175,15 +175,22 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(`{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}`)) //nolint:errcheck
 	}
-	if namespace := v2Namespace(r.URL.Path); namespace != "" && !namespaceAllowed(ctx, r, userID, orgID, namespace) {
-		deny(namespace)
-		return
+	// authorizeRepo is the namespace-ownership check widened with the project
+	// fallback: a caller who does not own the namespace is still allowed when the
+	// repository is linked to a project they hold (action) on. Unlinked repositories
+	// fall through to the identical namespaceAllowed decision as before.
+	if repo := v2RepoName(r.URL.Path); repo != "" {
+		ns, img, _ := strings.Cut(repo, "/")
+		if !authorizeRepo(ctx, r, userID, orgID, action, ns, img) {
+			deny(ns)
+			return
+		}
 	}
 	// A cross-repository blob mount (?from=<other-repo>) reads from a second
-	// repository, so that namespace must be owned by the caller as well.
+	// repository, so the caller must be authorized for that one as well.
 	if from := r.URL.Query().Get("from"); from != "" {
-		fromNS, _, _ := strings.Cut(from, "/")
-		if !namespaceAllowed(ctx, r, userID, orgID, fromNS) {
+		fromNS, fromImg, _ := strings.Cut(from, "/")
+		if !authorizeRepo(ctx, r, userID, orgID, action, fromNS, fromImg) {
 			deny(fromNS)
 			return
 		}
