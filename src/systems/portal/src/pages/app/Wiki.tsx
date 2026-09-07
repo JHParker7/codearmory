@@ -1,19 +1,20 @@
 /**
  * Wiki page: browse and edit a project's source-of-truth wiki. The wiki is
- * project-scoped, so you pick a project, then its manifest (the page index) shows
- * on the left and the selected page's editor on the right. Content lives in git
- * behind the wiki service (every save is a commit by the wiki bot), so there is a
- * per-page History. All calls go through the BFF to /api/wiki/*.
+ * project-scoped (the sidebar switcher picks the project); a dropdown picks the
+ * page. A selected page RENDERS — markdown pages through the shared Markdown
+ * component, other formats (openapi/sql/ts/yaml) as a code block — with an edit
+ * mode for the raw source + metadata. Content lives in git behind the wiki
+ * service (every save is a bot commit); the per-page git history is intentionally
+ * not surfaced here. All calls go through the BFF to /api/wiki/*.
  */
 import { useState, useEffect, useCallback } from 'react';
 import { useUrlParam } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
-import {
-  listWikiPages, getWikiPage, putWikiPage, deleteWikiPage, getWikiHistory,
-} from '../../api/bff';
-import type { WikiPageMeta, WikiCommit, WikiPageType, WikiPagePayload } from '../../api/bff';
+import { Markdown } from './Repos';
+import { listWikiPages, getWikiPage, putWikiPage, deleteWikiPage } from '../../api/bff';
+import type { WikiPageMeta, WikiPageType, WikiPagePayload } from '../../api/bff';
 
 const TYPES: WikiPageType[] = ['overview', 'architecture', 'contract', 'model', 'service', 'component', 'decision', 'ticket'];
 const STACKS = ['shared', 'frontend', 'backend', 'infra'];
@@ -28,14 +29,13 @@ const emptyDraft: Draft = { id: '', type: 'overview', stack: 'shared', format: '
 export function Wiki() {
   const token = useAppSelector(s => s.auth.token)!;
   const [confirm, confirmEl] = useConfirm();
-  // The project is the globally-selected one from the sidebar switcher — the wiki
-  // is one more project-scoped view, not its own separate namespace picker.
+  // The project is the globally-selected one from the sidebar switcher.
   const project = useAppSelector(s => s.project.current);
   const [pageId, setPageId] = useUrlParam('page');
   const [pages, setPages] = useState<WikiPageMeta[]>([]);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
-  const [history, setHistory] = useState<WikiCommit[]>([]);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -49,20 +49,21 @@ export function Wiki() {
 
   useEffect(() => { if (project) loadManifest(project); }, [project, loadManifest]);
 
-  // Load the selected page's content + history.
+  // Load the selected page's content. Land in view (rendered) mode, not edit.
   useEffect(() => {
     if (!project || !pageId) return;
-    setCreating(false);
+    setCreating(false); setEditing(false);
     (async () => {
       try {
         const p = await getWikiPage(token, project, pageId);
         setDraft({ id: p.id, type: p.type, stack: p.stack ?? 'shared', format: p.format, title: p.title, status: p.status, content: p.content });
-        setHistory(await getWikiHistory(token, project, pageId));
       } catch (e: unknown) { setErr(e instanceof Error ? e.message : 'failed to load page'); }
     })();
   }, [token, project, pageId]);
 
-  const newPage = () => { setCreating(true); setPageId(null); setDraft(emptyDraft); setHistory([]); };
+  const newPage = () => { setCreating(true); setEditing(true); setPageId(null); setDraft(emptyDraft); setErr(''); };
+  const startEdit = () => { setEditing(true); setErr(''); };
+  const cancelEdit = () => { setEditing(false); setCreating(false); setErr(''); };
 
   const save = async () => {
     if (!project || !draft.id.trim() || !draft.title.trim()) { setErr('id and title are required'); return; }
@@ -70,7 +71,7 @@ export function Wiki() {
     try {
       const payload: WikiPagePayload = { type: draft.type, stack: draft.stack, format: draft.format, title: draft.title, status: draft.status, content: draft.content };
       await putWikiPage(token, project, draft.id.trim(), payload);
-      setCreating(false);
+      setCreating(false); setEditing(false);
       await loadManifest(project);
       setPageId(draft.id.trim());
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : 'save failed'); }
@@ -81,15 +82,18 @@ export function Wiki() {
     if (!project || !draft.id) return;
     if (!(await confirm({ message: `Delete wiki page "${draft.id}"?`, confirmLabel: 'delete' }))) return;
     setBusy(true);
-    try { await deleteWikiPage(token, project, draft.id); await loadManifest(project); setPageId(null); setDraft(emptyDraft); setHistory([]); }
+    try { await deleteWikiPage(token, project, draft.id); await loadManifest(project); setPageId(null); setDraft(emptyDraft); }
     catch (e: unknown) { setErr(e instanceof Error ? e.message : 'delete failed'); }
     setBusy(false);
   };
 
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft(d => ({ ...d, [k]: v }));
 
+  const editMode = creating || editing;
+  const selected = pages.find(p => p.id === pageId);
+
   return (
-    <div style={{ padding: 20, color: T.text }}>
+    <div style={{ padding: 20, color: T.text, maxWidth: 1000 }}>
       {confirmEl}
       <h1 style={{ fontSize: 18, color: T.textHi, marginBottom: 4 }}>wiki/</h1>
       <p style={{ color: T.dim, fontSize: 13, marginBottom: 16 }}>A project's source of truth — architecture, API contracts, data models, decisions. Git-backed; every save is a commit.</p>
@@ -103,26 +107,28 @@ export function Wiki() {
       {err && <div style={{ color: T.red, background: T.redSoft, padding: '6px 10px', borderRadius: 4, marginBottom: 12, fontSize: 13 }}>{err}</div>}
 
       {project && (
-        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-          {/* Left: manifest */}
-          <div style={{ width: 260, flexShrink: 0, border: `1px solid ${T.border}`, borderRadius: 6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderBottom: `1px solid ${T.border}` }}>
-              <span style={{ color: T.dim, fontSize: 12 }}>{project} · {pages.length} pages</span>
-              <button onClick={newPage} style={{ ...btn, padding: '2px 8px', fontSize: 12 }}>+ new</button>
-            </div>
-            {pages.map(p => (
-              <button key={p.id} onClick={() => setPageId(p.id)}
-                style={{ display: 'block', width: '100%', textAlign: 'left', padding: '7px 10px', background: pageId === p.id ? T.cardHi : 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, color: T.text, cursor: 'pointer' }}>
-                <div style={{ fontSize: 13, color: T.textHi }}>{p.title}</div>
-                <div style={{ fontSize: 11, color: T.faint, fontFamily: T.mono }}>{p.type}{p.stack ? ` · ${p.stack}` : ''} · v{p.version}</div>
-              </button>
-            ))}
-            {pages.length === 0 && <div style={{ padding: 10, color: T.faint, fontSize: 12 }}>No pages yet.</div>}
+        <>
+          {/* Toolbar: page dropdown + actions */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+            <select
+              value={editMode && creating ? '' : (pageId ?? '')}
+              disabled={editMode}
+              onChange={e => { const v = e.target.value; setPageId(v || null); }}
+              style={{ ...box, minWidth: 260, cursor: editMode ? 'default' : 'pointer', opacity: editMode ? 0.6 : 1 }}>
+              <option value="">{pages.length ? '— select a page —' : 'No pages yet'}</option>
+              {pages.map(p => (
+                <option key={p.id} value={p.id}>{p.title} · {p.type}{p.stack ? ` · ${p.stack}` : ''}</option>
+              ))}
+            </select>
+
+            {!editMode && <button onClick={newPage} style={btn}>+ new page</button>}
+            {!editMode && pageId && <button onClick={startEdit} style={btn}>edit</button>}
+            {!editMode && pageId && <button onClick={del} disabled={busy} style={{ ...btn, background: T.redSoft, color: T.red, borderColor: T.red }}>delete</button>}
           </div>
 
-          {/* Right: editor */}
-          {(pageId || creating) && (
-            <div style={{ flex: 1, minWidth: 0 }}>
+          {/* Edit / create form */}
+          {editMode && (
+            <div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 8 }}>
                 <label style={{ fontSize: 12, color: T.dim }}>id
                   <input value={draft.id} disabled={!creating} onChange={e => set('id', e.target.value)} placeholder="contract-api" style={{ ...box, width: '100%', marginTop: 2, opacity: creating ? 1 : 0.6 }} /></label>
@@ -138,27 +144,34 @@ export function Wiki() {
                   <input value={draft.status} onChange={e => set('status', e.target.value)} style={{ ...box, width: '100%', marginTop: 2 }} /></label>
               </div>
               <textarea value={draft.content} onChange={e => set('content', e.target.value)} spellCheck={false}
-                style={{ ...box, width: '100%', minHeight: 320, fontFamily: T.mono, fontSize: 12.5, resize: 'vertical' }} />
+                placeholder={draft.format === 'md' ? '# Markdown…' : 'source…'}
+                style={{ ...box, width: '100%', minHeight: 360, fontFamily: T.mono, fontSize: 12.5, resize: 'vertical' }} />
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button onClick={save} disabled={busy} style={{ ...btn, background: T.greenSoft, color: T.green, borderColor: T.green }}>{busy ? 'saving…' : 'save'}</button>
-                {!creating && <button onClick={del} disabled={busy} style={{ ...btn, background: T.redSoft, color: T.red, borderColor: T.red }}>delete</button>}
+                <button onClick={cancelEdit} disabled={busy} style={btn}>cancel</button>
               </div>
-
-              {history.length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ color: T.dim, fontSize: 12, marginBottom: 6 }}>History</div>
-                  {history.map(c => (
-                    <div key={c.sha} style={{ fontSize: 12, padding: '3px 0', borderBottom: `1px solid ${T.border}` }}>
-                      <span style={{ color: T.green, fontFamily: T.mono }}>{c.sha.slice(0, 7)}</span>{' '}
-                      <span style={{ color: T.text }}>{c.subject}</span>{' '}
-                      <span style={{ color: T.faint }}>· {c.author}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
-        </div>
+
+          {/* View (rendered) mode */}
+          {!editMode && pageId && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 20, fontWeight: 700, color: T.textHi }}>{draft.title}</span>
+                <span style={{ fontSize: 11, color: T.faint, fontFamily: T.mono }}>
+                  {draft.type}{draft.stack ? ` · ${draft.stack}` : ''} · {draft.format}{selected ? ` · v${selected.version}` : ''}
+                </span>
+              </div>
+              {draft.format === 'md'
+                ? <Markdown source={draft.content} />
+                : <pre style={{ background: T.bgAlt, border: `1px solid ${T.border}`, borderRadius: 4, padding: '12px 14px', overflow: 'auto', fontFamily: T.mono, fontSize: 12, lineHeight: 1.55, color: T.text, whiteSpace: 'pre-wrap' }}>{draft.content}</pre>}
+            </div>
+          )}
+
+          {!editMode && !pageId && pages.length > 0 && (
+            <div style={{ color: T.faint, fontSize: 13 }}>Select a page above to read it.</div>
+          )}
+        </>
       )}
     </div>
   );

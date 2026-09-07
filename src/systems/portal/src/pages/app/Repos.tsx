@@ -185,8 +185,8 @@ function Inline({ nodes }: { nodes: MdInline[] }) {
   );
 }
 
-/** Rendered markdown — the README, and any .md file opened in the reader. */
-function Markdown({ source }: { source: string }) {
+/** Rendered markdown — the README, any .md file opened in the reader, and the wiki. */
+export function Markdown({ source }: { source: string }) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
   const heading = (level: number, children: ReactNode, key: number) => {
     const size = [19, 16, 14, 13][level - 1] ?? 13;
