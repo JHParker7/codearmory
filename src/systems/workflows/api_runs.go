@@ -140,13 +140,19 @@ func applyDeclaredInputs(defs []WorkflowInputDef, provided map[string]string) (m
 		if _, ok := out[d.Name]; ok {
 			continue
 		}
-		if d.Default != "" {
-			out[d.Name] = d.Default
-			continue
-		}
-		if d.Required {
+		if d.Required && d.Default == "" {
 			return nil, "missing required input: " + d.Name
 		}
+		// Materialise EVERY declared input the caller omitted — including one whose
+		// default is the empty string — so a step template referencing ${inputs.<name>}
+		// resolves to "" instead of failing the run ~22ms pre-forge with "no run input
+		// named X". Measured on the git-broker publish/clone blocker: the clone step
+		// reads an optional `ref`, and a freshly-created pipeline triggered without ref
+		// died here at template resolution; `build` only ever survived because its
+		// callers always passed ref explicitly. Skipping empty defaults made a declared
+		// optional input indistinguishable from an undeclared one — the exact case the
+		// "declare it in the pipeline's inputs" error tells the user to fix.
+		out[d.Name] = d.Default
 	}
 	return out, ""
 }
