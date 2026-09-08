@@ -35,16 +35,6 @@ func getUserByEmail(ctx context.Context, email string) (User, error) {
 	return user, nil
 }
 
-// ── Misc write helpers ────────────────────────────────────────────────────────
-
-// syncServiceAccountBootstrapKey updates the hashed_key column to match the
-// bootstrap hash after the bootstrap key fallback path succeeds in requireServiceAuth.
-func syncServiceAccountBootstrapKey(ctx context.Context, name, hash string) error {
-	return connect().WithContext(ctx).Model(&ServiceAccount{}).
-		Where("service_name = ?", name).
-		Update("hashed_key", hash).Error
-}
-
 // upgradeServiceKeyHash rewrites a legacy bcrypt hash in the cheap format, after
 // the key has already been verified.
 //
