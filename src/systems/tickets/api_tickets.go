@@ -279,6 +279,15 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 
 	meterTicketsCreated.Add(ctx, 1, metric.WithAttributes(attribute.String("priority", t.Priority)))
 	notifyEvents(ctx, eventTicketCreated, t, nil)
+	// A ticket created directly in a status counts as a transition INTO that status
+	// (empty -> t.Status): emit status_changed too, so a trigger keyed on
+	// ticket.status_changed (e.g. the requests board's in_progress -> agent chain)
+	// fires on create-in-status, not only on a later move. The trigger's own
+	// data.status filter decides which statuses actually act.
+	notifyEvents(ctx, eventTicketStatus, t, map[string]any{
+		"old_status": "",
+		"new_status": t.Status,
+	})
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "ticket created", "ticket_id", t.TicketID, "user_id", userID)
