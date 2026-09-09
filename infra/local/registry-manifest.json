@@ -2230,6 +2230,12 @@
     ],
     "actions": [
       {
+        "name": "git-factory/create-repo",
+        "summary": "Create a repo (with: name, visibility?); namespace is the caller's. Returns id, namespace, name.",
+        "method": "POST",
+        "path": "/repos"
+      },
+      {
         "name": "git-factory/resolve-repo",
         "summary": "Resolve a repo's id from its namespace+name (with: namespace, name)",
         "method": "POST",
