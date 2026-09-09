@@ -59,6 +59,12 @@ func ticketEventFields(t Ticket) map[string]any {
 		"created_by": t.CreatedBy,
 		"org_id":     t.OrgID,
 	}
+	// BoardID lets a trigger fire only for a specific board — e.g. a "requests" board
+	// whose tickets kick off the agent chain, distinct from the board the agents file
+	// their own work onto.
+	if t.BoardID != nil {
+		fields["board_id"] = *t.BoardID
+	}
 	if t.AssigneeID != nil {
 		fields["assignee_id"] = *t.AssigneeID
 	}
