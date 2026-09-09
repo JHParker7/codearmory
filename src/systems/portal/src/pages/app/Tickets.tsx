@@ -102,10 +102,13 @@ function slugify(s: string): string {
  * changes. Both modes expose the full ticket detail set — title, description,
  * priority, status, timescale, due date, and assignee — to match the CLI form.
  */
-function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOptions, users, onSaved, onClose }: {
+function TicketFormModal({ mode, ticket, boardId, defaultProject, statuses, priorities, parentOptions, users, onSaved, onClose }: {
   mode: 'create' | 'edit';
   ticket?: Ticket;
   boardId?: string;
+  // The selected project's slug — a new ticket defaults to it so it lands in the
+  // scope that is currently being viewed (otherwise it is filtered out and "vanishes").
+  defaultProject?: string;
   statuses: TicketFieldDef[];
   priorities: TicketFieldDef[];
   // Candidate parent tickets (same board, excluding this ticket) for the parent picker.
@@ -133,8 +136,8 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
     dueDate: ticket?.due_date ? ticket.due_date.slice(0, 10) : '',
     assigneeId: ticket?.assignee_id ?? '',
     parent: ticket?.parent_id ?? '',
-    project: ticket?.project ?? '',
-  }), [ticket, ordered]);
+    project: ticket?.project ?? defaultProject ?? '',
+  }), [ticket, ordered, defaultProject]);
   // Read any saved draft once, on first render, and seed the fields from it. Only a
   // draft that actually differs from the saved values counts as one to restore.
   const seed = useRef<typeof baseline | null>(null);
@@ -965,6 +968,7 @@ export function Tickets() {
         <TicketFormModal
           mode="create"
           boardId={createBoardId}
+          defaultProject={project ?? ''}
           statuses={statuses}
           priorities={priorities}
           parentOptions={visibleTickets}
