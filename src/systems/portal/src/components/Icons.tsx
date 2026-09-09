@@ -115,11 +115,11 @@ const PATHS: Record<IconName, JSX.Element> = {
 // Nerd Font (Symbols) codepoints per icon — a subset of the font is bundled (nerdfont.css).
 // Names not listed here fall back to the SVG glyph above, so nothing ever renders blank.
 const NERD: Partial<Record<IconName, number>> = {
-  workflows: 0xf0d1,   // workflow / pipeline (octicon)
-  builder: 0xf06a9,    // robot (the coding agents)
-  tickets: 0xf0611,    // ticket
-  blueprints: 0xf02d,  // book (wiki / source of truth)
-  git: 0xf1d3,         // git logo (repos)
+  workflows: 0xf07e5,  // md-pipe (pipeline)
+  builder: 0xf06a9,    // md-robot (the coding agents)
+  tickets: 0xf145,     // fa-ticket
+  blueprints: 0xf02d,  // fa-book (wiki / source of truth)
+  git: 0xe725,         // dev-git_branch (repos)
   argo: 0xf1e6,        // plug (git connector)
   forge: 0xf120,       // terminal
   events: 0xf0e7,      // bolt

@@ -417,7 +417,7 @@ const FILE_GLYPHS: Record<string, number> = {
   go: 0xe627, js: 0xe60c, jsx: 0xe60c, mjs: 0xe60c, cjs: 0xe60c,
   ts: 0xe628, tsx: 0xe628, md: 0xe609, markdown: 0xe609,
   json: 0xe60b, py: 0xe606, html: 0xe60e, htm: 0xe60e,
-  css: 0xe614, sh: 0xe795, bash: 0xe795, zsh: 0xe795,
+  css: 0xe614, sh: 0xe691, bash: 0xe691, zsh: 0xe691,
   yml: 0xe6a8, yaml: 0xe6a8, rs: 0xe7a8,
 };
 function entryIcon(type: string, name = ''): string {
@@ -425,7 +425,7 @@ function entryIcon(type: string, name = ''): string {
   if (type === 'symlink') return String.fromCodePoint(0xf0c1);   // link
   if (type === 'submodule') return String.fromCodePoint(0xe702); // git
   const base = name.toLowerCase();
-  if (base === 'dockerfile' || base.endsWith('.dockerfile')) return String.fromCodePoint(0xe790);
+  if (base === 'dockerfile' || base.endsWith('.dockerfile')) return String.fromCodePoint(0xe7b0);
   if (base.endsWith('.lock') || base === 'go.sum') return String.fromCodePoint(0xf023);
   const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
   return String.fromCodePoint(FILE_GLYPHS[ext] ?? 0xf15b);       // generic file

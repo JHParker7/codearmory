@@ -15,8 +15,6 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logoutSession, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
 import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
 import { createProject } from '../../api/bff';
-import { shortId } from '../../utils';
-import { useOrgNames } from '../../hooks/useNames';
 
 /**
  * Maps each service-gated /app route segment to its backing platform service, so an
@@ -107,38 +105,30 @@ function NavItem({ to, label, badge, service, collapsed, icon, desc }: { to: str
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   if (service && isUnavailable(service, registeredServices)) return null;
   const token = label.replace(/\/$/, '').slice(0, 2);
-  // Collapsed: label (+ its subtitle) become the hover tooltip since neither is
-  // visible on the slim rail. Expanded: the subtitle renders inline, so no tooltip.
-  const tooltip = collapsed ? (desc ? `${label} — ${desc}` : label) : undefined;
+  // CONSTANT-HEIGHT ROW with a fixed icon column: the icon sits in a 54px cell on the
+  // left, the label follows and is simply clipped by the rail's width when collapsed.
+  // Expanding the rail reveals the label to the right WITHOUT moving the icon — same X,
+  // same Y in both states. The label (+ subtitle) is always the hover tooltip.
+  const tooltip = desc ? `${label} — ${desc}` : label;
   return (
     <NavLink to={to} title={tooltip} style={({ isActive }) => ({
-      display: 'flex', flexDirection: collapsed ? 'row' : 'column',
-      alignItems: collapsed ? 'center' : 'stretch', justifyContent: 'center',
-      padding: collapsed ? '9px 0' : '7px 14px',
+      display: 'flex', alignItems: 'center', height: 40,
       background: isActive ? T.greenSoft : 'transparent',
       borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`,
       color: isActive ? T.textHi : T.text,
       fontFamily: T.mono, fontSize: 13, textDecoration: 'none',
-      transition: 'background .12s',
-      cursor: 'pointer',
+      transition: 'background .12s', cursor: 'pointer',
+      whiteSpace: 'nowrap', overflow: 'hidden',
     })}
     onMouseEnter={(e) => { if (!e.currentTarget.getAttribute('aria-current')) e.currentTarget.style.background = T.greenFaint; }}
     onMouseLeave={(e) => { if (!e.currentTarget.getAttribute('aria-current')) e.currentTarget.style.background = 'transparent'; }}
     >
-      {collapsed ? (
-        <span style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12 }}>
-          {icon ? <Icon name={icon} /> : token}
-          {badge && <span style={{ position: 'absolute', top: -3, right: -6, width: 5, height: 5, borderRadius: '50%', background: T.amber }} />}
-        </span>
-      ) : (
-        <>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>{label}</span>
-            {badge && <span style={{ fontSize: 9, color: T.amber, border: `1px solid ${T.amber}`, padding: '0 4px', letterSpacing: 0.5 }}>{badge}</span>}
-          </div>
-          {desc && <span style={{ fontSize: 10.5, color: T.faint, lineHeight: 1.3, marginTop: 2 }}>{desc}</span>}
-        </>
-      )}
+      <span style={{ width: 54, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
+        {icon ? <Icon name={icon} /> : <span style={{ fontSize: 12 }}>{token}</span>}
+        {badge && <span style={{ position: 'absolute', top: 9, right: 13, width: 5, height: 5, borderRadius: '50%', background: T.amber }} />}
+      </span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>{label}</span>
+      {badge && !collapsed && <span style={{ fontSize: 9, color: T.amber, border: `1px solid ${T.amber}`, padding: '0 4px', letterSpacing: 0.5, marginRight: 10, flexShrink: 0 }}>{badge}</span>}
     </NavLink>
   );
 }
@@ -195,33 +185,27 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   // `current` is a slug; show the matching project's display name when we have it.
   const currentLabel = known.find(p => p.slug === current)?.name || current;
 
-  // Collapsed rail: a dot that hints whether a scope is active and expands the
-  // sidebar (where the full switcher lives) when clicked.
-  if (collapsed) {
-    return (
-      <button onClick={onExpand} title={current ? `project: ${currentLabel}` : 'all projects'}
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 0', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, cursor: 'pointer', width: '100%' }}>
-        <span style={{ width: 8, height: 8, borderRadius: 2, border: `1px solid ${current ? T.green : T.faint}`, background: current ? T.green : 'transparent' }} />
-      </button>
-    );
-  }
-
+  // CONSTANT-HEIGHT row: the scope indicator (a dot) sits in the fixed icon column so it
+  // never moves; the current project name + chevron reveal to its right when the rail is
+  // expanded (clipped by the rail width when slim). Clicking while collapsed just pins the
+  // rail open — the dropdown needs the width. The dropdown itself is an absolute overlay.
   return (
-    <div style={{ position: 'relative', padding: '10px 14px', borderBottom: `1px solid ${T.border}` }}>
-      <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 5, textTransform: 'uppercase' }}>project</div>
-      <button onClick={() => { const next = !open; setOpen(next); if (next) dispatch(fetchKnownProjects(token)); }}
-        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: T.card, border: `1px solid ${open ? T.green : T.border}`, color: current ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, padding: '6px 9px', cursor: 'pointer', transition: 'border-color .12s' }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {current ? <><span style={{ color: T.green }}>◆ </span>{currentLabel}</> : 'all projects'}
+    <div style={{ position: 'relative', borderBottom: `1px solid ${T.border}` }}>
+      <button onClick={() => { if (collapsed) { onExpand(); return; } const next = !open; setOpen(next); if (next) dispatch(fetchKnownProjects(token)); }}
+        title={current ? `project: ${currentLabel}` : 'all projects'}
+        style={{ width: '100%', height: 44, display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', color: current ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, cursor: 'pointer', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+        <span style={{ width: 54, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <span style={{ width: 9, height: 9, borderRadius: 2, border: `1px solid ${current ? T.green : T.faint}`, background: current ? T.green : 'transparent' }} />
         </span>
-        <span style={{ color: T.faint, fontSize: 10, flexShrink: 0 }}>{open ? '▴' : '▾'}</span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', textAlign: 'left' }}>{current ? currentLabel : 'all projects'}</span>
+        <span style={{ color: T.faint, fontSize: 10, flexShrink: 0, marginRight: 12 }}>{open ? '▴' : '▾'}</span>
       </button>
 
-      {open && (
+      {open && !collapsed && (
         <>
           {/* Click-away backdrop so the dropdown closes on any outside click. */}
           <div onClick={() => { setOpen(false); setCreating(''); setErr(''); }} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-          <div style={{ position: 'absolute', top: '100%', left: 14, right: 14, marginTop: 4, zIndex: 41, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', maxHeight: 320, overflowY: 'auto' }}>
+          <div style={{ position: 'absolute', top: '100%', left: 8, right: 8, marginTop: 2, zIndex: 41, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', maxHeight: 320, overflowY: 'auto' }}>
             <button onClick={() => choose(null)}
               style={{ width: '100%', textAlign: 'left', background: !current ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${!current ? T.green : 'transparent'}`, color: !current ? T.green : T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer' }}>
               all projects
@@ -268,33 +252,20 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
  * In the collapsed rail there is no header to click, so items always render (matching
  * today's slim-rail behaviour), and per-section state is left untouched.
  */
-function NavSection({ title, sidebarCollapsed, defaultCollapsed = false, children }: { title: string; sidebarCollapsed: boolean; defaultCollapsed?: boolean; children: ReactNode }) {
-  // v2 namespace: bumped when the default expansion changed (only tools stays open by
-  // default) so the new defaults apply even in browsers that persisted the old ones.
-  // We persist only on an explicit toggle, so an untouched section always follows
-  // defaultCollapsed while a user's own choice still sticks across reloads.
-  const storageKey = `nav.section.v2.${title}`;
-  const [collapsed, setCollapsed] = useState(() => {
-    const stored = localStorage.getItem(storageKey);
-    return stored === null ? defaultCollapsed : stored === '1';
-  });
-  const toggle = () => setCollapsed(c => { const next = !c; localStorage.setItem(storageKey, next ? '1' : '0'); return next; });
-
-  // Slim rail: no header to toggle, so show the items as-is.
-  if (sidebarCollapsed) return <>{children}</>;
-
+function NavSection({ title, sidebarCollapsed, children }: { title: string; sidebarCollapsed: boolean; defaultCollapsed?: boolean; children: ReactNode }) {
+  // A CONSTANT-HEIGHT header row so the items below keep the same Y whether the rail is
+  // slim or expanded: a short divider sits in the fixed icon column, and the section
+  // title reveals to its right when expanded. Items always render (no per-section
+  // collapse) so the item SET never changes on expand — nothing shifts under the cursor.
   return (
     <>
-      <button onClick={toggle} title={collapsed ? `expand ${title}` : `minimise ${title}`}
-        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-          background: 'transparent', border: 'none', color: T.faint, fontFamily: T.mono, fontSize: 10,
-          letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase', cursor: 'pointer', transition: 'color .12s' }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.faint; }}>
-        <span>{title}</span>
-        <span style={{ fontSize: 8, flexShrink: 0, lineHeight: 1 }}>{collapsed ? '▸' : '▾'}</span>
-      </button>
-      {!collapsed && children}
+      <div style={{ height: 26, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+        <span style={{ width: 54, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <span style={{ width: 16, height: 1, background: T.border }} />
+        </span>
+        {!sidebarCollapsed && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{title}</span>}
+      </div>
+      {children}
     </>
   );
 }
@@ -303,7 +274,6 @@ function NavSection({ title, sidebarCollapsed, defaultCollapsed = false, childre
 export function AppLayout() {
   const token = useAppSelector(s => s.auth.token)!;
   const user = useAppSelector(s => s.auth.user);
-  const orgNames = useOrgNames(token);
   const permissions = useAppSelector(s => s.auth.permissions);
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   const serviceUiPaths = useAppSelector(s => s.auth.serviceUiPaths);
@@ -315,14 +285,16 @@ export function AppLayout() {
   // portal shows the project picker (front door) with just a slim top bar.
   const currentProject = useAppSelector(s => s.project.current);
 
-  // Sidebar behaviour: a slim icon rail BY DEFAULT to hand the main pane more width;
-  // the pin toggle («/») expands it (persisted). It deliberately does NOT expand on
-  // hover — expanding reflows the whole rail (user panel, section headers, collapsed
-  // sections appear/disappear), which moved icons out from under the cursor as you
-  // reached for one. Labels are available as tooltips on the slim rail instead.
+  // Sidebar behaviour: a slim icon rail by default; it EXPANDS on hover to reveal each
+  // item's label beside its icon, and the pin toggle («/») keeps it open (persisted).
+  // The rail's rows are constant-height with a fixed icon column, so expanding only
+  // reveals labels to the right — icons never move on the Y axis as you reach for one.
+  // Hover-expand OVERLAYS the content (absolute) so the main pane doesn't reflow; only
+  // pinning reserves the width in the flex flow.
   const [navPinned, setNavPinned] = useState(() => localStorage.getItem('nav.pinned') === '1');
   useEffect(() => { localStorage.setItem('nav.pinned', navPinned ? '1' : '0'); }, [navPinned]);
-  const navMini = !navPinned;
+  const [navHover, setNavHover] = useState(false);
+  const navMini = !navPinned && !navHover;
   // When expanded, the sidebar width is user-draggable (persisted). The width
   // transition is suspended mid-drag so it tracks the cursor crisply, then restored
   // so the collapse/expand toggle still animates.
@@ -390,9 +362,12 @@ export function AppLayout() {
         </header>
       ) : (
       <>
-      {/* Sidebar */}
-      <aside
-        style={{ width: navMini ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease' }}>
+      {/* Sidebar — a 56px flow spacer reserves the rail's width (or the full width when
+          pinned); the aside itself is absolutely positioned so hover-expand overlays the
+          content instead of reflowing it. */}
+      <div style={{ width: navPinned ? navW : 56, flexShrink: 0, position: 'relative', transition: navResizing ? 'none' : 'width .14s ease' }}>
+      <aside onMouseEnter={() => setNavHover(true)} onMouseLeave={() => setNavHover(false)}
+        style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: navMini ? 56 : navW, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease', zIndex: 30, overflow: 'hidden', boxShadow: navHover && !navPinned ? '4px 0 16px rgba(0,0,0,0.35)' : undefined }}>
         {/* Logo + minimise toggle */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: navMini ? 'center' : 'space-between', gap: 10, padding: navMini ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
           {!navMini && (
@@ -408,16 +383,6 @@ export function AppLayout() {
             {navPinned ? '«' : '»'}
           </button>
         </div>
-
-        {/* User */}
-        {user && !navMini && (
-          <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}` }}>
-            <div style={{ fontSize: 11, color: T.faint, letterSpacing: 0.5, marginBottom: 4 }}>SIGNED IN AS</div>
-            <div style={{ fontSize: 13, color: T.textHi, fontWeight: 600 }}>@{user.username}</div>
-            <div style={{ fontSize: 11, color: T.dim, marginTop: 2 }}>{user.email}</div>
-            {user.org_id && <div style={{ fontSize: 10.5, color: T.faint, marginTop: 4 }}>org: {orgNames[user.org_id] ?? shortId(user.org_id)}</div>}
-          </div>
-        )}
 
         {/* Project switcher — current-project view filter (or a slim indicator when collapsed). */}
         <ProjectSwitcher collapsed={navMini} onExpand={() => setNavPinned(true)} />
@@ -475,6 +440,7 @@ export function AppLayout() {
           </button>
         </div>
       </aside>
+      </div>
 
       {/* Drag to resize the sidebar (only while expanded). */}
       {navPinned && navHandle}
