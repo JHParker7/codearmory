@@ -426,9 +426,9 @@ export function AppLayout() {
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto', overflowX: 'hidden' }}>
           <NavSection title="tools" sidebarCollapsed={navMini}>
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navMini} icon="workflows" />
-            <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navMini} icon="workflows" />
+            <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navMini} icon="builder" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navMini} icon="tickets" />
-            <NavItem to="/app/wiki" label="wiki/" desc="Project source of truth (git-backed)" service="wiki" collapsed={navMini} icon="tickets" />
+            <NavItem to="/app/wiki" label="wiki/" desc="Project source of truth (git-backed)" service="wiki" collapsed={navMini} icon="blueprints" />
             {/* The git host, under the name people came for. Its route stays the
                 registry name so existing links keep working. */}
             <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navMini} icon="git" />
@@ -442,7 +442,7 @@ export function AppLayout() {
           <NavSection title="modules" sidebarCollapsed={navMini} defaultCollapsed>
             {/* Labelled for what it is — a credential broker for repos hosted
                 elsewhere — so it is not mistaken for repos/, which hosts them here. */}
-            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navMini} icon="git" />
+            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navMini} icon="argo" />
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navMini} icon="forge" />
             <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navMini} icon="events" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navMini} icon="containers" />

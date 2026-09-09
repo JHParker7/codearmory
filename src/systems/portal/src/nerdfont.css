@@ -1,0 +1,21 @@
+/* Self-hosted Symbols Nerd Font, subset to just the glyphs the portal uses (~6KB).
+   Bundled through vite (imported from main.tsx) so it loads from the portal's own
+   origin — no runtime CDN dependency, unlike the JetBrains Mono webfont. */
+@font-face {
+  font-family: 'NerdSymbols';
+  src: url('./nerdfont.woff2') format('woff2');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* A nerd-font glyph. The mono stack is the fallback while the font loads (or if it
+   fails), so a missing font degrades to a blank box on one glyph, never breaks text. */
+.nf {
+  font-family: 'NerdSymbols', 'JetBrains Mono', ui-monospace, monospace;
+  font-style: normal;
+  font-weight: normal;
+  line-height: 1;
+  display: inline-block;
+  text-align: center;
+}

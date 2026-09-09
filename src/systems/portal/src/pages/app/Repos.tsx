@@ -411,12 +411,24 @@ function CreateRepo({ onCreated, onCancel }: { onCreated: (r: GitFactoryRepo) =>
 
 // ── code tab ─────────────────────────────────────────────────────────────────
 
-/** Icon glyph for a tree entry type. */
-function entryIcon(type: string): string {
-  if (type === 'dir') return '▸';
-  if (type === 'symlink') return '↳';
-  if (type === 'submodule') return '⊟';
-  return '·';
+/** Nerd Font glyph for a tree entry — folder/link/submodule by type, else by file extension.
+ *  Rendered inside a `.nf` span (see nerdfont.css); an unknown extension gets a generic file. */
+const FILE_GLYPHS: Record<string, number> = {
+  go: 0xe627, js: 0xe60c, jsx: 0xe60c, mjs: 0xe60c, cjs: 0xe60c,
+  ts: 0xe628, tsx: 0xe628, md: 0xe609, markdown: 0xe609,
+  json: 0xe60b, py: 0xe606, html: 0xe60e, htm: 0xe60e,
+  css: 0xe614, sh: 0xe795, bash: 0xe795, zsh: 0xe795,
+  yml: 0xe6a8, yaml: 0xe6a8, rs: 0xe7a8,
+};
+function entryIcon(type: string, name = ''): string {
+  if (type === 'dir') return String.fromCodePoint(0xf07b);       // folder
+  if (type === 'symlink') return String.fromCodePoint(0xf0c1);   // link
+  if (type === 'submodule') return String.fromCodePoint(0xe702); // git
+  const base = name.toLowerCase();
+  if (base === 'dockerfile' || base.endsWith('.dockerfile')) return String.fromCodePoint(0xe790);
+  if (base.endsWith('.lock') || base === 'go.sum') return String.fromCodePoint(0xf023);
+  const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
+  return String.fromCodePoint(FILE_GLYPHS[ext] ?? 0xf15b);       // generic file
 }
 
 const parentPath = (p: string) => p.split('/').slice(0, -1).join('/');
@@ -593,7 +605,7 @@ function CodeTab({ repo, refName }: { repo: GitFactoryRepo; refName: string }) {
               <button key={e.path}
                 onClick={() => { if (e.type === 'dir') setPath(e.path); else setFile(e.path); }}
                 style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11.5, padding: '6px 10px', cursor: 'pointer' }}>
-                <span style={{ width: 14, textAlign: 'center', color: e.type === 'dir' ? T.green : T.faint }}>{entryIcon(e.type)}</span>
+                <span className="nf" style={{ width: 16, fontSize: 13, color: e.type === 'dir' ? T.green : T.faint }}>{entryIcon(e.type, e.name)}</span>
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
                 {e.type !== 'dir' && <span style={{ color: T.faint, fontSize: 10.5 }}>{formatBytes(e.size)}</span>}
               </button>

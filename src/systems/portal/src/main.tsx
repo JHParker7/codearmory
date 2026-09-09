@@ -6,6 +6,7 @@
  */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import './nerdfont.css';
 import { Provider } from 'react-redux';
 import { store } from './store';
 import { hydrateUser } from './store/authSlice';
