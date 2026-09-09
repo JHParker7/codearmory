@@ -913,6 +913,8 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const [commits, setCommits] = useState<GitFactoryCommit[] | null>(null);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [wfNames, setWfNames] = useState<Record<string, string>>({});
+  const [wfSteps, setWfSteps] = useState<Record<string, number>>({}); // workflow_id → total step count, for the progress bar
+  const [nowTick, setNowTick] = useState(() => Date.now()); // ticks every 1s while a run is live, so the elapsed clock moves
   const [userNames, setUserNames] = useState<Record<string, string>>({});
   const [plannedTasks, setPlannedTasks] = useState<Record<string, string[]>>({}); // reviewer run_id → the fix tasks its map will run (in order)
   const [error, setError] = useState<string | null>(null);
@@ -979,11 +981,24 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
     return () => { cancelled = true; clearInterval(iv); };
   }, [token, repo.name, number, version]);
 
+  // A 1s clock so a running workflow's elapsed time advances between the 8s run polls.
+  // Only ticks while something is actually live, so a settled PR view does no work.
+  useEffect(() => {
+    const anyLive = runs.some(r => r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval');
+    if (!anyLive) return;
+    const iv = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [runs]);
+
   // workflow_id → name, so a run entry can read "pr-review" / "fix-arm-c" not a uuid.
   useEffect(() => {
     let cancelled = false;
     listWorkflows(token)
-      .then(ws => { if (!cancelled) setWfNames(Object.fromEntries((ws ?? []).map(w => [w.workflow_id, w.name]))); })
+      .then(ws => {
+        if (cancelled) return;
+        setWfNames(Object.fromEntries((ws ?? []).map(w => [w.workflow_id, w.name])));
+        setWfSteps(Object.fromEntries((ws ?? []).map(w => [w.workflow_id, (w.steps ?? []).length])));
+      })
       .catch(() => { /* names are best-effort; fall back to the short id */ });
     return () => { cancelled = true; };
   }, [token]);
@@ -1070,11 +1085,31 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
   const toneFor = (st: string, running: boolean): 'green' | 'amber' | 'red' | 'dim' =>
     st === 'success' ? 'green' : st === 'fail' ? 'red' : running ? 'amber' : 'dim';
   const colorFor = (tone: string) => tone === 'green' ? T.green : tone === 'red' ? T.red : tone === 'amber' ? T.amber : T.dim;
+  const fmtDur = (ms: number) => {
+    if (!isFinite(ms) || ms < 0) ms = 0;
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${s % 60}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+  };
   const runNode = (r: WorkflowRun, opts?: { child?: boolean; parentName?: string }) => {
     const name = wfNames[r.workflow_id] || r.workflow_id.slice(0, 8);
     const running = r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval';
     const st = stFor(r.status);
     const tone = toneFor(st, running);
+    // Progress: steps done of the pipeline's total, and how long the run has been going.
+    // current_step advances as steps start; a finished run counts as all-done. total comes
+    // from the pipeline definition (wfSteps); 0 when the pipeline isn't loaded yet.
+    const total = wfSteps[r.workflow_id] ?? 0;
+    const done = r.status === 'completed' ? (total || (r.current_step ?? 0))
+      : Math.min(Math.max(r.current_step ?? 0, 0), total || Infinity);
+    const startMs = new Date(r.started_at || r.created_at).getTime();
+    const endMs = running ? nowTick : new Date(r.ended_at || r.started_at || r.created_at).getTime();
+    const elapsed = isFinite(startMs) ? fmtDur(endMs - startMs) : '';
+    const pct = total ? Math.round((done / total) * 100) : (running ? 100 : 0);
+    const showBar = total > 0 || running;
     return (
       <div style={{ marginLeft: opts?.child ? 18 : 0 }}>
         <Node color={colorFor(tone)}>
@@ -1084,6 +1119,17 @@ function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, o
           <span style={{ color: T.faint }}> · {r.run_id.slice(0, 8)}</span>
           {opts?.parentName && <span style={{ color: T.faint, fontSize: 10 }}> · started by {opts.parentName}</span>}
         </Node>
+        {showBar && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2, marginLeft: 14 }}>
+            <div style={{ width: 90, height: 4, borderRadius: 2, background: T.border, overflow: 'hidden', flexShrink: 0 }}
+              title={total ? `${done} of ${total} steps` : undefined}>
+              <div style={{ width: `${pct}%`, height: '100%', background: colorFor(tone), transition: 'width .3s' }} />
+            </div>
+            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
+              {total ? `${done}/${total} steps` : `${done} steps`}{elapsed && <> · {running ? '' : 'ran '}{elapsed}</>}
+            </span>
+          </div>
+        )}
       </div>
     );
   };
