@@ -44,11 +44,18 @@ func eventsEnabled() bool { return eventEmitter.Enabled() }
 // (data.status, data.priority, …).
 func ticketEventFields(t Ticket) map[string]any {
 	fields := map[string]any{
-		"ticket_id":  t.TicketID,
-		"title":      t.Title,
-		"status":     t.Status,
-		"priority":   t.Priority,
-		"timescale":  t.Timescale,
+		"ticket_id": t.TicketID,
+		"title":     t.Title,
+		// Description carries the actual request text, so an event-triggered pipeline
+		// (a ticket moved to in_progress firing the agent chain) can pass it through as
+		// the task; title alone is only a headline.
+		"description": t.Description,
+		"status":      t.Status,
+		"priority":    t.Priority,
+		"timescale":   t.Timescale,
+		// Project lets a trigger scope/route by the ticket's project (the agent chain
+		// runs against a project's wiki and board).
+		"project":    t.Project,
 		"created_by": t.CreatedBy,
 		"org_id":     t.OrgID,
 	}
