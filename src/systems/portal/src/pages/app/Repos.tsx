@@ -1629,6 +1629,7 @@ export function Repos() {
   const [error, setError] = useState<string | null>(null);
   const [selId, setSelId] = useUrlParam('repo');
   const [showCreate, setShowCreate] = useState(false);
+  const [query, setQuery] = useState('');
   const [railW, railHandle] = useResizableWidth('rail.repos.main', 260, { min: 200, max: 480 });
   const [, setTab] = useUrlState<RepoTab>('tab', 'code');
   const [, setRefName] = useUrlParam('ref');
@@ -1655,11 +1656,17 @@ export function Repos() {
   useEffect(() => { fetchRepos(); }, [fetchRepos]);
 
   // The project switcher is a view filter across the portal; repos carry the same
-  // label, so an active project narrows this list too.
-  const visible = useMemo(
-    () => (project ? repos.filter(r => r.project === project) : repos),
-    [repos, project],
-  );
+  // label, so an active project narrows this list too. On top of that, the search
+  // box narrows by name/namespace, and the list is ordered most-recently-updated
+  // first so the repo you last touched is at the top.
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return repos
+      .filter(r => (project ? r.project === project : true))
+      .filter(r => !q || r.name.toLowerCase().includes(q) || (r.namespace ?? '').toLowerCase().includes(q))
+      .slice()
+      .sort((a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime());
+  }, [repos, project, query]);
 
   const selected = visible.find(r => r.id === selId) ?? null;
 
@@ -1695,6 +1702,15 @@ export function Repos() {
               <button onClick={fetchRepos} title="refresh" style={{ ...ghostBtn, padding: '3px 7px' }}>↻</button>
             </div>
           </div>
+          <div style={{ position: 'relative', margin: '8px 0 6px' }}>
+            <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', fontFamily: T.mono, fontSize: 11, color: T.faint, pointerEvents: 'none' }}>⌕</span>
+            <input value={query} onChange={e => setQuery(e.target.value)} placeholder="search repos…" spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', padding: '5px 22px 5px 22px', fontFamily: T.mono, fontSize: 11, color: T.text, background: T.bg, border: `1px solid ${T.border}`, borderRadius: 3, outline: 'none' }} />
+            {query && (
+              <button onClick={() => setQuery('')} title="clear" aria-label="clear search"
+                style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', background: 'transparent', border: 0, cursor: 'pointer', color: T.faint, fontFamily: T.mono, fontSize: 12, padding: '0 4px', lineHeight: 1 }}>×</button>
+            )}
+          </div>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
             {visible.length > 0 && `${visible.length} repositor${visible.length === 1 ? 'y' : 'ies'}${project ? ` in ${project}` : ''}`}
           </div>
@@ -1712,7 +1728,9 @@ export function Repos() {
             <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
           ) : visible.length === 0 ? (
             <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, lineHeight: 1.7 }}>
-              → no repositories{project ? ` in ${project}` : ''}<br />press + to create one
+              {query.trim()
+                ? <>→ no repositories match “{query.trim()}”</>
+                : <>→ no repositories{project ? ` in ${project}` : ''}<br />press + to create one</>}
             </div>
           ) : visible.map(r => {
             const isActive = selected?.id === r.id;
