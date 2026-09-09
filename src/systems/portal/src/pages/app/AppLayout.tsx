@@ -315,13 +315,14 @@ export function AppLayout() {
   // portal shows the project picker (front door) with just a slim top bar.
   const currentProject = useAppSelector(s => s.project.current);
 
-  // Sidebar behaviour: minimised to a slim icon rail BY DEFAULT to hand the main
-  // pane more width, expanding while hovered. The toggle "pins" it open; the pin
-  // choice is persisted. navMini is the effective visual state.
+  // Sidebar behaviour: a slim icon rail BY DEFAULT to hand the main pane more width;
+  // the pin toggle («/») expands it (persisted). It deliberately does NOT expand on
+  // hover — expanding reflows the whole rail (user panel, section headers, collapsed
+  // sections appear/disappear), which moved icons out from under the cursor as you
+  // reached for one. Labels are available as tooltips on the slim rail instead.
   const [navPinned, setNavPinned] = useState(() => localStorage.getItem('nav.pinned') === '1');
   useEffect(() => { localStorage.setItem('nav.pinned', navPinned ? '1' : '0'); }, [navPinned]);
-  const [navHover, setNavHover] = useState(false);
-  const navMini = !navPinned && !navHover;
+  const navMini = !navPinned;
   // When expanded, the sidebar width is user-draggable (persisted). The width
   // transition is suspended mid-drag so it tracks the cursor crisply, then restored
   // so the collapse/expand toggle still animates.
@@ -390,8 +391,8 @@ export function AppLayout() {
       ) : (
       <>
       {/* Sidebar */}
-      <aside onMouseEnter={() => setNavHover(true)} onMouseLeave={() => setNavHover(false)}
-        style={{ width: navMini ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease', zIndex: navHover && !navPinned ? 30 : undefined }}>
+      <aside
+        style={{ width: navMini ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease' }}>
         {/* Logo + minimise toggle */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: navMini ? 'center' : 'space-between', gap: 10, padding: navMini ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
           {!navMini && (
