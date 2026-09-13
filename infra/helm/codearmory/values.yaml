@@ -262,7 +262,7 @@ forge:
     # When set to "docker", mount the Docker socket via forge.dockerSocket.
     runtime: kubernetes
     # Comma-separated list of container images forge is permitted to run.
-    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
+    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25,aquasec/trivy:latest,docker:27-dind"
     # Kubernetes namespace in which forge creates sandbox Jobs. Empty = the release
     # namespace (so a default install works with no prerequisite). Set a dedicated
     # namespace — which MUST already exist — for stronger isolation of sandbox Jobs.
