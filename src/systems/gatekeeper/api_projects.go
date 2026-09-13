@@ -23,12 +23,25 @@ var projectTiers = map[string][]string{
 	"admin":     {"*"},
 }
 
+// projectUseTiers is the USE-ONLY action set a CHILD project's members receive over each
+// ANCESTOR's namespace, implementing "inherit a parent's resources by reference: view
+// and run them, never edit them." It deliberately omits create*/update*/write*/delete* so
+// a child can list/read a parent's pipeline and TRIGGER a run (triggerRun ← "trigger*"),
+// but cannot modify or delete the parent's copy — mutate rights stay with the owning
+// project. Capped even for a child ADMIN: admin of a child is not admin of its parent.
+var projectUseTiers = map[string][]string{
+	"viewer":    {"read*", "list*", "get*"},
+	"developer": {"read*", "list*", "get*", "run*", "trigger*"},
+	"admin":     {"read*", "list*", "get*", "run*", "trigger*"},
+}
+
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 type createProjectRequest struct {
-	Slug  string  `json:"slug"`
-	Name  string  `json:"name"`
-	OrgID *string `json:"org_id"` // optional; when set the project is owned/managed by the org
+	Slug   string  `json:"slug"`
+	Name   string  `json:"name"`
+	OrgID  *string `json:"org_id"` // optional; when set the project is owned/managed by the org
+	Parent *string `json:"parent"` // optional parent project SLUG; makes this a child in the project tree
 }
 
 type projectMemberRequest struct {
@@ -47,7 +60,7 @@ func projectResource(slug string) string { return "project/" + slug + "/*" }
 // single "project/<slug>/*" pattern) and a Role holding it, owned by the project's first
 // admin. The project namespace is brand-new and belongs to no user, so this establishes
 // the roles directly without the confinement/attenuation the user-namespace path needs.
-func provisionTierRole(ctx context.Context, ownerID, slug, tier string) (string, error) {
+func provisionTierRole(ctx context.Context, ownerID, slug, tier string, ancestors []Project) (string, error) {
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Name:          "project:" + slug + ":" + tier,
@@ -60,19 +73,46 @@ func provisionTierRole(ctx context.Context, ownerID, slug, tier string) (string,
 	if err := perm.Add(ctx); err != nil {
 		return "", err
 	}
+	permIDs := []string{perm.PermissionsID}
+	created := []Permissions{perm}
+	// Inheritance: grant this tier USE-ONLY access over every ancestor's namespace, so
+	// a child inherits the parent chain's resources by reference (view + run, never
+	// edit). The namespace wildcard means new parent resources are inherited too, and a
+	// parent edit propagates — no copies. On any failure, tear down what was created.
+	for _, anc := range ancestors {
+		up := Permissions{
+			PermissionsID: uuid.New().String(),
+			Name:          "project-use:" + slug + ":" + tier + ":" + anc.Slug,
+			Service:       "*",
+			Actions:       projectUseTiers[tier],
+			Resources:     []string{projectResource(anc.Slug)},
+			OwnerID:       ownerID,
+			Active:        true,
+		}
+		if err := up.Add(ctx); err != nil {
+			for _, c := range created {
+				_ = c.Remove(ctx)
+			}
+			return "", err
+		}
+		permIDs = append(permIDs, up.PermissionsID)
+		created = append(created, up)
+	}
 	role := Role{
 		RoleID:         uuid.New().String(),
 		Name:           "project/" + slug + "/" + tier,
-		PermissionsIDs: []string{perm.PermissionsID},
+		PermissionsIDs: permIDs,
 		OwnerID:        ownerID,
 		Active:         true,
 	}
 	if err := role.Add(ctx); err != nil {
-		// The permission is a Service "*" / Actions ["*"] wildcard over the project
-		// namespace and is reachable only through the role that was meant to carry it.
-		// Leaving it behind would accumulate an unattached wildcard grant per attempt.
-		if e := perm.Remove(ctx); e != nil {
-			slog.ErrorContext(ctx, "provision tier role: orphaned permission left behind", "permission_id", perm.PermissionsID, "error", e)
+		// The permissions (a Service "*" wildcard over the project namespace, plus any
+		// ancestor use-grants) are reachable only through the role that was meant to carry
+		// them; leaving them behind accumulates unattached grants per attempt.
+		for _, c := range created {
+			if e := c.Remove(ctx); e != nil {
+				slog.ErrorContext(ctx, "provision tier role: orphaned permission left behind", "permission_id", c.PermissionsID, "error", e)
+			}
 		}
 		return "", err
 	}
@@ -163,12 +203,48 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional parent: makes this a child in the project tree, so it inherits the
+	// parent's resources by reference. The parent must exist and be active, and the
+	// caller must be able to create within the parent's namespace (its admin/developer)
+	// — creating a child is administering the parent, not just a self-service act. No
+	// cycle is possible: the parent pre-exists and this is a fresh leaf.
+	var parentID *string
+	var ancestors []Project // parent → root; the child inherits (use-only) from the whole chain
+	if req.Parent != nil && strings.TrimSpace(*req.Parent) != "" {
+		parentSlug := strings.TrimSpace(*req.Parent)
+		parent, perr := getProjectBySlug(ctx, parentSlug)
+		if perr != nil || !parent.Active {
+			http.Error(w, "unknown parent project "+parentSlug, http.StatusBadRequest)
+			return
+		}
+		if !requirePermission(w, r, "createProject", "project/"+parent.Slug+"/gatekeeper/projects") {
+			return
+		}
+		parentID = &parent.ProjectID
+		ancestors = append(ancestors, parent)
+		seen := map[string]bool{parent.ProjectID: true}
+		for cur := parent; cur.ParentID != nil && *cur.ParentID != "" && !seen[*cur.ParentID]; {
+			row, gerr := (Project{ProjectID: *cur.ParentID}).Get(ctx)
+			if gerr != nil {
+				break
+			}
+			anc := row.(Project)
+			if !anc.Active {
+				break
+			}
+			ancestors = append(ancestors, anc)
+			seen[anc.ProjectID] = true
+			cur = anc
+		}
+	}
+
 	p := Project{
 		ProjectID: uuid.New().String(),
 		Slug:      req.Slug,
 		Namespace: orgNS,
 		Name:      req.Name,
 		OwnerID:   callerID,
+		ParentID:  parentID,
 		CreatedAt: time.Now().UTC(),
 		Active:    true,
 	}
@@ -193,18 +269,18 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	// here rolls the whole creation back: the caller is told the project was not created,
 	// so no grant over its namespace — and no row holding its slug — may outlive the call.
 	var err error
-	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "viewer"); err != nil {
+	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "viewer", ancestors); err != nil {
 		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision viewer role", err)
 		return
 	}
-	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "developer"); err != nil {
+	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "developer", ancestors); err != nil {
 		discardTierRoles(ctx, p.ViewerRoleID)
 		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision developer role", err)
 		return
 	}
-	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "admin"); err != nil {
+	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "admin", ancestors); err != nil {
 		discardTierRoles(ctx, p.ViewerRoleID, p.DeveloperRoleID)
 		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision admin role", err)
@@ -284,6 +360,47 @@ func handleGetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// handleGetProjectAncestors returns the project followed by its ancestor chain, root
+// LAST — the effective-scope list for resource inheritance: a child's inherited
+// resources are those of every project in this chain. Membership is checked only on
+// the requested (child) project, not each ancestor: inheriting a parent's resources is
+// exactly a child member seeing them WITHOUT being an ancestor member. The walk stops
+// at a missing/inactive/deleted parent (a dangling link) and is cycle-guarded.
+func handleGetProjectAncestors(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	callerID, _ := ctx.Value(userIDKey).(string)
+	row, err := (Project{ProjectID: r.PathValue("id")}).Get(ctx)
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	p := row.(Project)
+	if !isProjectMember(ctx, callerID, p) {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	chain := []Project{p}
+	seen := map[string]bool{p.ProjectID: true}
+	cur := p
+	for cur.ParentID != nil && *cur.ParentID != "" {
+		if seen[*cur.ParentID] {
+			break // cycle guard — should be impossible, but never loop
+		}
+		prow, perr := (Project{ProjectID: *cur.ParentID}).Get(ctx)
+		if perr != nil {
+			break // dangling parent (e.g. deleted) — stop the chain here
+		}
+		pp := prow.(Project)
+		if !pp.Active {
+			break
+		}
+		chain = append(chain, pp)
+		seen[pp.ProjectID] = true
+		cur = pp
+	}
+	writeJSON(w, http.StatusOK, chain)
 }
 
 func handleUpdateProject(w http.ResponseWriter, r *http.Request) {

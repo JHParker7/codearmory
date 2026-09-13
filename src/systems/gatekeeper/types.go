@@ -428,6 +428,11 @@ type Project struct {
 	ViewerRoleID    string    `json:"viewer_role_id"    gorm:"column:viewer_role_id;default:''"`
 	DeveloperRoleID string    `json:"developer_role_id" gorm:"column:developer_role_id;default:''"`
 	AdminRoleID     string    `json:"admin_role_id"     gorm:"column:admin_role_id;default:''"`
+	// ParentID links this project to its parent in the project tree (nil = a top-level
+	// root project). Children inherit the parent's resources (pipelines, boards, …) by
+	// reference, so a parent change propagates to children — resolution walks this chain.
+	// Nullable so a root has no parent; AutoMigrate adds the column to existing tables.
+	ParentID        *string   `json:"parent_id,omitempty" gorm:"column:parent_id;index"`
 	CreatedAt       time.Time `json:"created_at"        gorm:"column:created_at;autoCreateTime"`
 	Active          bool      `json:"-"                 gorm:"column:active;default:true"`
 }

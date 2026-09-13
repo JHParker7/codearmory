@@ -431,6 +431,7 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /projects", mw(handleListProjects))
 	mux.Handle("GET /projects/accessible", mw(handleListAccessibleProjects))
 	mux.Handle("GET /projects/{id}", mw(handleGetProject))
+	mux.Handle("GET /projects/{id}/ancestors", mw(handleGetProjectAncestors))
 	mux.Handle("PUT /projects/{id}", mw(handleUpdateProject))
 	mux.Handle("DELETE /projects/{id}", mw(handleDeleteProject))
 	mux.Handle("POST /projects/{id}/members", mw(handleAddProjectMember))
