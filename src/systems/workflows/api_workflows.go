@@ -553,22 +553,31 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   time.Now().UTC(),
 	}
 
-	// If Project names a real gatekeeper project the caller can reach, file the
-	// pipeline into it — but only if the caller may create within it (developer/admin/
-	// owner). A slug that resolves to nothing stays a free-text label (unchanged
-	// behaviour); a slug the caller may only view is refused rather than silently
-	// downgraded to a label.
-	if req.Project != "" {
+	// Every pipeline must belong to a project — no projectless pipelines. The slug
+	// must resolve to a real gatekeeper project the caller may create within
+	// (developer/admin/owner); an empty or unresolvable project is rejected (400)
+	// rather than silently kept as a free-text label, and a view-only project is
+	// refused (403).
+	if req.Project == "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project is required", http.StatusBadRequest)
+		return
+	}
+	{
 		bearer := r.Header.Get("Authorization")
-		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !checkProjectPermission(ctx, bearer, "createWorkflow", "pipelines", p.Slug, "") {
-				span.SetStatus(codes.Ok, "")
-				http.Error(w, "you cannot create pipelines in project "+p.Slug, http.StatusForbidden)
-				return
-			}
-			wf.ProjectID = p.ProjectID
-			wf.ProjectNamespace = p.Namespace
+		p := resolveProjectSlug(ctx, bearer, req.Project)
+		if p == nil {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "unknown project "+req.Project, http.StatusBadRequest)
+			return
 		}
+		if !checkProjectPermission(ctx, bearer, "createWorkflow", "pipelines", p.Slug, "") {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "you cannot create pipelines in project "+p.Slug, http.StatusForbidden)
+			return
+		}
+		wf.ProjectID = p.ProjectID
+		wf.ProjectNamespace = p.Namespace
 	}
 
 	steps, err := enrichStepRefs(ctx, refs)

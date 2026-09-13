@@ -124,6 +124,11 @@ func revokeRunToken(ctx context.Context, sessionID string) {
 type triggerRunRequest struct {
 	// Inputs are extra env vars injected into every step. Step-level env takes precedence.
 	Inputs map[string]string `json:"inputs"`
+	// Project, when set, attributes the run to the TRIGGERING project rather than the
+	// pipeline's own project — so a child running an INHERITED pipeline sees the run
+	// under its own project (runs are own-project scoped; see the project hierarchy).
+	// Honoured only when the caller may trigger runs in that project; otherwise ignored.
+	Project string `json:"project"`
 }
 
 // applyDeclaredInputs merges the trigger's provided inputs over the pipeline's
@@ -294,6 +299,21 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
+	}
+
+	// Attribute the run to the triggering project when asked (and permitted): a child
+	// running an INHERITED pipeline should see the run under ITS own project, not the
+	// pipeline's parent. authorizeWorkflow above already confirmed the caller may run
+	// this pipeline; here we additionally require they may trigger within the target
+	// project, then tag the run with it (a local wf copy, so only the run's project moves).
+	if tp := strings.TrimSpace(req.Project); tp != "" && tp != wf.Project {
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, tp); p != nil &&
+			checkProjectPermission(ctx, bearer, "triggerRun", "pipelines", p.Slug, wf.WorkflowID) {
+			wf.Project = p.Slug
+			wf.ProjectID = p.ProjectID
+			wf.ProjectNamespace = p.Namespace
+		}
 	}
 
 	run, errMsg, code := startWorkflowRun(ctx, &wf, userID, orgID, inputs, 0, "")
