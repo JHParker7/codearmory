@@ -342,20 +342,26 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}
-	// File into a project when asked and permitted (developer/admin/owner). A slug that
-	// resolves to no accessible project is kept as a plain label; a project the caller
-	// may only view is refused rather than silently downgraded.
-	if req.Project != "" {
-		re.Project = req.Project
-		bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !projectAllowsRepoAction(ctx, bearer, "createRepo", p.Slug) {
-				http.Error(w, "you cannot create repos in project "+p.Slug, http.StatusForbidden)
-				return
-			}
-			re.ProjectID, re.ProjectNamespace = p.ProjectID, p.Namespace
-		}
+	// Every repo must belong to a project — no projectless resources. The slug must
+	// resolve to a real project the caller may create repos in; an empty or
+	// unresolvable project is rejected (400) rather than silently kept as a free-text
+	// label, and a project the caller may only view is refused (403).
+	if req.Project == "" {
+		http.Error(w, "project is required", http.StatusBadRequest)
+		return
 	}
+	re.Project = req.Project
+	bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	p := resolveProjectSlug(ctx, bearer, req.Project)
+	if p == nil {
+		http.Error(w, "unknown project "+req.Project, http.StatusBadRequest)
+		return
+	}
+	if !projectAllowsRepoAction(ctx, bearer, "createRepo", p.Slug) {
+		http.Error(w, "you cannot create repos in project "+p.Slug, http.StatusForbidden)
+		return
+	}
+	re.ProjectID, re.ProjectNamespace = p.ProjectID, p.Namespace
 	if err := re.Add(ctx); err != nil {
 		if isUniqueViolation(err) {
 			http.Error(w, "a Repo with this name already exists", http.StatusConflict)
