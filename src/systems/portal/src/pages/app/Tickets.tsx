@@ -459,6 +459,10 @@ export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
   // The selected project scopes the board to that project's tickets (null = all).
   const project = useAppSelector(s => s.project.current);
+  // Effective display scope: selected project + ancestors, so a child shows the boards
+  // and tickets it inherits from its parents. Fetch unscoped and filter by the chain.
+  const chain = useAppSelector(s => s.project.chain);
+  const chainKey = chain.join('|');
   const users = useUsers(token);
   // Derive the id→username map from the same catalog the assignee picker uses, to avoid a second fetch.
   const userNames = useMemo(() => Object.fromEntries(users.map(u => [u.user_id, u.username])), [users]);
@@ -534,17 +538,18 @@ export function Tickets() {
     if (!silent) { setLoading(true); setError(null); }
     try {
       const [tk, bd] = await Promise.all([
-        listTickets(token, project ?? undefined),
+        listTickets(token),
         listBoards(token).catch(() => [] as Board[]),
       ]);
-      setTickets(tk);
-      setBoards(bd);
+      const inScope = (p?: string) => (chain.length ? (!!p && chain.includes(p)) : true);
+      setTickets(tk.filter(t => inScope(t.project)));
+      setBoards(bd.filter(b => inScope(b.project)));
     } catch (e: unknown) {
       if (!silent) setError((e as Error).message);
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [token, project]);
+  }, [token, chainKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchData(); }, [fetchData]);
 

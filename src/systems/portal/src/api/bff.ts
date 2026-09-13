@@ -528,8 +528,14 @@ export function listWorkflowRuns(token: string, workflowId: string) {
   return req<WorkflowRun[]>('GET', `/workflows/runs?workflow_id=${workflowId}`, token);
 }
 
-export function triggerWorkflow(token: string, workflowId: string, inputs?: Record<string, unknown>) {
-  return req<WorkflowRun>('POST', `/workflows/pipelines/${workflowId}/runs`, token, inputs ? { inputs } : {});
+export function triggerWorkflow(token: string, workflowId: string, inputs?: Record<string, unknown>, project?: string) {
+  // `project` attributes the run to the current (possibly child) project so a run of an
+  // INHERITED pipeline shows under the project it was triggered in, not the pipeline's
+  // parent. The server honours it only when the caller may trigger there.
+  const body: Record<string, unknown> = {};
+  if (inputs) body.inputs = inputs;
+  if (project) body.project = project;
+  return req<WorkflowRun>('POST', `/workflows/pipelines/${workflowId}/runs`, token, body);
 }
 
 export function listRuns(token: string) {
@@ -749,6 +755,8 @@ export interface Board {
   position: number;
   created_by: string;
   org_id?: string | null;
+  /** The project slug this board belongs to (for project-scoped filtering / inheritance). */
+  project?: string;
   created_at: string;
   updated_at: string;
   /** Server-computed ticket tallies for this board: open = not resolved/closed, total = all active. */
@@ -2318,6 +2326,8 @@ export interface Project {
   viewer_role_id: string;
   developer_role_id: string;
   admin_role_id: string;
+  /** Parent project id in the project tree, or null/absent for a top-level (root) project. */
+  parent_id?: string | null;
   /** The caller's tier on this project — present on the accessible listing, absent on owned/single reads. */
   tier?: ProjectTier;
 }
@@ -2347,6 +2357,15 @@ export function createProject(token: string, slug: string, name: string) {
 
 export function getProject(token: string, id: string) {
   return req<Project>('GET', `/gatekeeper/projects/${id}`, token);
+}
+
+/**
+ * The project's ancestor chain: [self, parent, …root]. Used to display inherited
+ * resources — a child shows its own resources plus those of every project in this
+ * chain. Membership is checked only on the requested (child) project.
+ */
+export function getProjectAncestors(token: string, id: string) {
+  return req<Project[]>('GET', `/gatekeeper/projects/${id}/ancestors`, token);
 }
 
 export function deleteProject(token: string, id: string) {

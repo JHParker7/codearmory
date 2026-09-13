@@ -13,7 +13,7 @@ import { useResizablePane } from '../../components/ResizeHandle';
 import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logoutSession, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
-import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
+import { setCurrentProject, fetchKnownProjects, fetchAncestorChain } from '../../store/projectSlice';
 import { createProject } from '../../api/bff';
 
 /**
@@ -284,6 +284,7 @@ export function AppLayout() {
   // The sidebar nav only appears once a project is selected — before that the
   // portal shows the project picker (front door) with just a slim top bar.
   const currentProject = useAppSelector(s => s.project.current);
+  const knownProjects = useAppSelector(s => s.project.known);
 
   // Sidebar behaviour: a slim icon rail by default; it EXPANDS on hover to reveal each
   // item's label beside its icon, and the pin toggle («/») keeps it open (persisted).
@@ -336,6 +337,15 @@ export function AppLayout() {
     // Not gated on `token`: it is empty after a reload, where the cookie authenticates.
     if (user) dispatch(fetchKnownProjects(token));
   }, [user, token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Resolve the selected project's ancestor chain so list views can show inherited
+  // (parent) resources. Maps the current slug → project_id via the known list, then
+  // fetches [self, …ancestors]. Re-runs when the selection or the known list changes.
+  useEffect(() => {
+    if (!user || !currentProject) return;
+    const proj = knownProjects.find(p => p.slug === currentProject);
+    if (proj) dispatch(fetchAncestorChain({ token, projectId: proj.project_id }));
+  }, [user, token, currentProject, knownProjects]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
     // The thunk, not the bare reducer: it revokes the session and clears the

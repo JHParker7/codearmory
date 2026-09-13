@@ -270,6 +270,9 @@ function ExecutionsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   // Current-project view filter from the sidebar switcher: filters the list and
   // tags new executions so they stay visible under the active filter.
+  // Executions are RUNS, not definitions — they are NOT inherited: a child shows only
+  // its OWN project's runs (own-project scope), so a parent's runs don't clutter/confuse
+  // the child's view. (Definitions — pipelines/boards/repos — do inherit; runs do not.)
   const project = useAppSelector(s => s.project.current);
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [runnerClasses, setRunnerClasses] = useState<RunnerClass[]>([]);

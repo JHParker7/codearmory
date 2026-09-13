@@ -679,13 +679,22 @@ function PipelinesTab() {
   // Current-project view filter — refetch whenever it changes so the list tracks
   // the sidebar switcher.
   const project = useAppSelector(s => s.project.current);
+  // Effective display scope: the selected project + its ancestors, so a child shows
+  // pipelines it inherits from its parents (view + run; the run executes under the
+  // child's own grants). Fetch unscoped and filter by the chain rather than the single
+  // ?project= slug, which would return only the child's own pipelines.
+  const chain = useAppSelector(s => s.project.chain);
+  const chainKey = chain.join('|');
 
   const fetchWorkflows = useCallback(async () => {
     setLoading(true); setError(null);
-    try { setWorkflows(await listWorkflows(token, project ?? undefined)); }
+    try {
+      const all = await listWorkflows(token);
+      setWorkflows(chain.length ? all.filter(w => !!w.project && chain.includes(w.project)) : all);
+    }
     catch (e: unknown) { setError((e as Error).message); }
     finally { setLoading(false); }
-  }, [token, project]);
+  }, [token, chainKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
 
@@ -744,7 +753,7 @@ function PipelinesTab() {
     }
     setTriggering(true);
     try {
-      const run = await triggerWorkflow(token, selected, inputs);
+      const run = await triggerWorkflow(token, selected, inputs, project ?? undefined);
       setRuns(prev => [run, ...prev]);
       navigate(`/app/workflows/runs/${run.run_id}`); // straight to the new run's live page
     } catch (e: unknown) { setError((e as Error).message); }
