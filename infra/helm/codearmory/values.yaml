@@ -1449,5 +1449,16 @@ postgresql:
           CREATE DATABASE git_factory;
           CREATE DATABASE artifacts;
           CREATE DATABASE events;
-          CREATE DATABASE events;
           CREATE DATABASE outpost_gateway;
+          CREATE DATABASE containers;
+          CREATE DATABASE blacksmith;
+    # Bumped from the subchart's 192Mi default: under load (registry ingesting the whole
+    # manifest on cold boot) 192Mi OOM-kills postgres, whose slow recovery then crash-loops
+    # registry AND git-factory until the DB warms. 1Gi keeps cold starts healthy.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
