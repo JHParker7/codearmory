@@ -239,6 +239,12 @@
         "resource": "gatekeeper/projects"
       },
       {
+        "method": "GET",
+        "path": "/projects/{id}/ancestors",
+        "action": "getProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
         "method": "PUT",
         "path": "/projects/{id}",
         "action": "updateProject",
