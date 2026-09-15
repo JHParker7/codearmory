@@ -2584,5 +2584,75 @@
       }
     ],
     "default_grants": []
+  },
+  {
+    "name": "notifications",
+    "url": "http://notifications:8094",
+    "description": "Notification delivery via pluggable providers (Slack, Discord, webhook, email).",
+    "forward_auth": true,
+    "service_key": "notifications-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/providers",
+        "action": "listProvider",
+        "resource": "notifications/providers"
+      },
+      {
+        "method": "GET",
+        "path": "/channels",
+        "action": "listChannel",
+        "resource": "notifications/channels"
+      },
+      {
+        "method": "POST",
+        "path": "/channels",
+        "action": "createChannel",
+        "resource": "notifications/channels"
+      },
+      {
+        "method": "GET",
+        "path": "/channels/{id}",
+        "action": "getChannel",
+        "resource": "notifications/channels/{id}"
+      },
+      {
+        "method": "PUT",
+        "path": "/channels/{id}",
+        "action": "updateChannel",
+        "resource": "notifications/channels/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/channels/{id}",
+        "action": "deleteChannel",
+        "resource": "notifications/channels/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/channels/{id}/test",
+        "action": "testChannel",
+        "resource": "notifications/channels/{id}"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "listProvider",
+          "listChannel",
+          "createChannel",
+          "getChannel",
+          "updateChannel",
+          "deleteChannel",
+          "testChannel"
+        ],
+        "resources": [
+          "{username}/notifications/providers",
+          "{username}/notifications/channels",
+          "{username}/notifications/channels/*"
+        ]
+      }
+    ]
   }
 ]

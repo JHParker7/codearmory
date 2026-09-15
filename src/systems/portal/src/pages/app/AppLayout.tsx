@@ -34,6 +34,7 @@ const ROUTE_SERVICE: Record<string, string> = {
   codearmory_git_factory: 'codearmory_git_factory',
   outposts: 'outpost-gateway',
   'blacksmith-roles': 'blacksmith',
+  notifications: 'notifications',
 };
 
 // Services with a first-class bundled page. Any OTHER registered service that
@@ -101,7 +102,7 @@ function isUnavailable(service: string, registered: string[] | null): boolean {
  * kept as a tooltip) so the sidebar can minimise to a slim rail; without an
  * `icon` it falls back to a two-letter token.
  */
-function NavItem({ to, label, badge, service, collapsed, icon, desc }: { to: string; label: string; badge?: string; service?: string; collapsed?: boolean; icon?: IconName; desc?: string }) {
+function NavItem({ to, label, badge, service, collapsed, icon, letter, desc }: { to: string; label: string; badge?: string; service?: string; collapsed?: boolean; icon?: IconName; letter?: string; desc?: string }) {
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   if (service && isUnavailable(service, registeredServices)) return null;
   const token = label.replace(/\/$/, '').slice(0, 2);
@@ -124,7 +125,11 @@ function NavItem({ to, label, badge, service, collapsed, icon, desc }: { to: str
     onMouseLeave={(e) => { if (!e.currentTarget.getAttribute('aria-current')) e.currentTarget.style.background = 'transparent'; }}
     >
       <span style={{ width: 54, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
-        {icon ? <Icon name={icon} /> : <span style={{ fontSize: 12 }}>{token}</span>}
+        {icon ? <Icon name={icon} />
+          // A single letter drawn as the glyph (no bell in the ~6KB nerd-font subset, so
+          // notifications/ uses a text 'N' to read distinct from events/'s bolt).
+          : letter ? <span aria-hidden="true" style={{ fontSize: 16, fontWeight: 600, lineHeight: 1, fontFamily: T.mono }}>{letter}</span>
+          : <span style={{ fontSize: 12 }}>{token}</span>}
         {badge && <span style={{ position: 'absolute', top: 9, right: 13, width: 5, height: 5, borderRadius: '50%', background: T.amber }} />}
       </span>
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>{label}</span>
@@ -421,6 +426,7 @@ export function AppLayout() {
             <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navMini} icon="argo" />
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navMini} icon="forge" />
             <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navMini} icon="events" />
+            <NavItem to="/app/notifications" label="notifications/" desc="Send events to Slack, Discord, email" service="notifications" collapsed={navMini} letter="N" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navMini} icon="containers" />
             <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navMini} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future

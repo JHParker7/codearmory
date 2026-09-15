@@ -1,0 +1,143 @@
+{{- if .Values.blacksmith.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-blacksmith
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: blacksmith
+spec:
+  {{- include "codearmory.replicas" .Values.blacksmith }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: blacksmith
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: blacksmith
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+      containers:
+        - name: blacksmith
+          image: "{{ include "codearmory.image" (list . .Values.blacksmith) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.blacksmith.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.blacksmith.port | quote }}
+            # readOnlyRootFilesystem: transcripts and any scratch go to the /tmp
+            # emptyDir below; HOME points there too.
+            - name: HOME
+              value: /tmp
+            - name: AGENTS_TRANSCRIPT_DIR
+              value: /tmp/transcripts
+            # ── Model: ollama on the workstation, reached over the codearmory
+            # bridge (host bound to 192.168.67.1). Small and large share it. NOTE:
+            # AGENTS_LARGE_REASONING_EFFORT is deliberately UNSET so the coding
+            # roles think — reasoning off was the dev-loop regression.
+            - name: AGENTS_LARGE_ENDPOINT
+              value: {{ .Values.blacksmith.env.modelEndpoint | quote }}
+            - name: AGENTS_LARGE_MODEL
+              value: {{ .Values.blacksmith.env.model | quote }}
+            - name: AGENTS_LARGE_SLOTS
+              value: {{ .Values.blacksmith.env.slots | quote }}
+            - name: AGENTS_LARGE_TEMPERATURE
+              value: "0"
+            - name: AGENTS_LARGE_TOOLS
+              value: "true"
+            - name: AGENTS_SMALL_ENDPOINT
+              value: {{ .Values.blacksmith.env.modelEndpoint | quote }}
+            - name: AGENTS_SMALL_MODEL
+              value: {{ .Values.blacksmith.env.model | quote }}
+            - name: AGENTS_SMALL_SLOTS
+              value: {{ .Values.blacksmith.env.slots | quote }}
+            - name: AGENTS_SMALL_TEMPERATURE
+              value: "0"
+            - name: AGENTS_SMALL_TOOLS
+              value: "true"
+            # ── Database (roles live in postgres). PGPASSWORD from the postgresql
+            # subchart's secret; the DSN interpolates it ($(VAR) is resolved by the
+            # kubelet because PGPASSWORD is declared first).
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgresql
+                  key: postgres-password
+            - name: AGENTS_DATABASE_URL
+              value: "postgres://postgres:$(PGPASSWORD)@{{ .Release.Name }}-postgresql:5432/blacksmith?sslmode=disable"
+            # ── Forge (sandbox executions) + gatekeeper (per-run delegation) ──
+            - name: AGENTS_FORGE_URL
+              value: "http://{{ $fullname }}-forge:{{ .Values.forge.port }}"
+            - name: AGENTS_FORGE_GATEKEEPER_URL
+              value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            - name: AGENTS_GATEKEEPER_URL
+              value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            - name: AGENTS_FORGE_EMAIL
+              value: {{ .Values.blacksmith.env.forgeEmail | quote }}
+            - name: AGENTS_FORGE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-blacksmith
+                  key: forge-password
+            - name: AGENTS_TICKETS_URL
+              value: "http://{{ $fullname }}-tickets:{{ .Values.tickets.port }}"
+            # The proxy the FORGE sandbox uses for egress (injected into executions).
+            - name: AGENTS_SANDBOX_PROXY
+              value: "http://{{ $fullname }}-forge-egress-proxy:3128"
+            - name: AGENTS_REPO_IMAGE
+              value: {{ .Values.blacksmith.env.runnerImage | quote }}
+            # The forge runner class the agent's sandbox lease asks for. Must be a
+            # class forge has configured (the workflow's forge/run steps use "large").
+            # Unset, blacksmith defaults to "agent-dev", which forge rejects with
+            # "runner class not found".
+            - name: AGENTS_REPO_RUNNER_CLASS
+              value: {{ .Values.blacksmith.env.runnerClass | quote }}
+            # Registry service key: conductor forward-auths, then signs with this.
+            - name: AGENTS_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-blacksmith
+                  key: registry-service-key
+            {{- include "codearmory.otel.envs" (list . .Values.blacksmith.env) | nindent 12 }}
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.blacksmith.resources | nindent 12 }}
+      volumes:
+        - name: scratch
+          emptyDir: {}
+{{- end }}

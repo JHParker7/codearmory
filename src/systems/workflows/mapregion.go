@@ -311,7 +311,19 @@ func (p *WorkerPool) runMapRegion(
 		// allow_empty, "no items" is a legitimate outcome — record the region as a
 		// completed no-op (kept visible in the run view) and let the run stay green.
 		if region.def.AllowEmpty {
-			return map[string]string{}, p.mapSkip(runID, g, region, fmt.Sprintf("map %q produced no values — skipped (allow_empty)", region.def.ID)), 0
+			// Bind each region node's aggregate output to an empty JSON array, the same
+			// [] shape the populated path publishes (just empty), so a downstream
+			// ${steps.<node>.output} RESOLVES to [] rather than being left unbound.
+			// Without this a skipped map leaves the node's output absent, and a consumer
+			// — e.g. pr-review's report step reads ${steps.fix.output} to build its
+			// "Fixed?" column — hard-fails with "is not an ancestor" on any zero-findings
+			// PR (measured on pr-review run a3493b6e: extract found 0 findings, fixmap
+			// skipped, report died on the unresolved ref).
+			empty := make(map[string]string, len(region.nodes))
+			for _, n := range region.nodes {
+				empty[n] = "[]"
+			}
+			return empty, p.mapSkip(runID, g, region, fmt.Sprintf("map %q produced no values — skipped (allow_empty)", region.def.ID)), 0
 		}
 		return nil, p.mapFail(runID, g, region, fmt.Sprintf("map %q produced no values to run", region.def.ID)), 0
 	}

@@ -686,6 +686,15 @@ function PipelinesTab() {
   const chain = useAppSelector(s => s.project.chain);
   const chainKey = chain.join('|');
 
+  // A run is in the current view's scope when its own project is in the chain (the
+  // selected project + its ancestors). Runs are fetched per-pipeline and a pipeline
+  // lives in a PARENT project, so without this a parent view would show a child
+  // project's runs — the same chain filter the pipeline list uses (below).
+  const runInScope = useCallback(
+    (r: WorkflowRun) => !chain.length || (!!r.project && chain.includes(r.project)),
+    [chainKey], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   const fetchWorkflows = useCallback(async () => {
     setLoading(true); setError(null);
     try {
@@ -714,7 +723,7 @@ function PipelinesTab() {
   useEffect(() => {
     if (!selected || !liveRun) return;
     const id = setInterval(async () => {
-      try { setRuns(await listWorkflowRuns(token, selected)); } catch { /* keep last good */ }
+      try { setRuns((await listWorkflowRuns(token, selected)).filter(runInScope)); } catch { /* keep last good */ }
     }, 2500);
     return () => clearInterval(id);
   }, [selected, liveRun, token]);
@@ -728,7 +737,7 @@ function PipelinesTab() {
     getWorkflow(token, id)
       .then(full => setWorkflows(prev => prev.map(w => w.workflow_id === id ? full : w)))
       .catch(() => { /* keep the list entry on a transient error */ });
-    try { setRuns(await listWorkflowRuns(token, id)); }
+    try { setRuns((await listWorkflowRuns(token, id)).filter(runInScope)); }
     catch { setRuns([]); }
     finally { setRunsLoading(false); }
   }, [token]);

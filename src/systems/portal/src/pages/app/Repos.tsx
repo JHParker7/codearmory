@@ -18,6 +18,7 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useUrlParam, useUrlState } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
@@ -1688,16 +1689,17 @@ export function Repos() {
   const [repos, setRepos] = useState<GitFactoryRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selId, setSelId] = useUrlParam('repo');
+  // The selected repo lives in the PATH now — /app/codearmory_git_factory/<owner>/<project>/<name>
+  // — so the URL reads like other git hosts instead of ?repo=<uuid>. owner is the repo's
+  // git-factory namespace (the same segment the clone URL uses), project its slug, name its
+  // name. tab/pr/ref/path/file/commit stay query params (managed by the child views).
+  const navigate = useNavigate();
+  const { owner: pOwner, project: pProject, name: pName } = useParams();
+  const repoPath = useCallback((r: GitFactoryRepo) =>
+    `/app/codearmory_git_factory/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.project || '-')}/${encodeURIComponent(r.name)}`, []);
   const [showCreate, setShowCreate] = useState(false);
   const [query, setQuery] = useState('');
   const [railW, railHandle] = useResizableWidth('rail.repos.main', 260, { min: 200, max: 480 });
-  const [, setTab] = useUrlState<RepoTab>('tab', 'code');
-  const [, setRefName] = useUrlParam('ref');
-  const [, setPath] = useUrlParam('path');
-  const [, setFile] = useUrlParam('file');
-  const [, setPr] = useUrlParam('pr');
-  const [, setCommit] = useUrlParam('commit');
   // Guards the auto-select below so it only runs on the first load, leaving a
   // deliberate "nothing selected" alone afterwards.
   const seeded = useRef(false);
@@ -1729,26 +1731,22 @@ export function Repos() {
       .sort((a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime());
   }, [repos, project, query]);
 
-  const selected = visible.find(r => r.id === selId) ?? null;
+  // Resolve the path segments to a repo (from all accessible repos, not just the
+  // chain-filtered rail, so a deep link to an inherited/parent repo still resolves).
+  const selected = repos.find(r => r.namespace === pOwner && (r.project || '-') === pProject && r.name === pName) ?? null;
 
   // Land on the first repo when nothing is selected, so the page opens on content
   // rather than an empty pane.
   useEffect(() => {
     if (seeded.current || loading) return;
     seeded.current = true;
-    if (!selId && visible.length) setSelId(visible[0].id);
-  }, [loading, visible, selId, setSelId]);
+    if (!pName && visible.length) navigate(repoPath(visible[0]), { replace: true });
+  }, [loading, visible, pName, navigate, repoPath]);
 
-  /** Open a repo, resetting the per-repo view state the URL carries. */
-  const open = (r: GitFactoryRepo) => {
-    setSelId(r.id);
-    setTab('code');
-    setRefName(null);
-    setPath(null);
-    setFile(null);
-    setPr(null);
-    setCommit(null);
-  };
+  /** Open a repo: navigate to its readable path. Landing on the bare repo path
+   *  clears the query string, which resets the per-repo view state (tab/ref/path/
+   *  file/pr/commit) the child views carry there. */
+  const open = (r: GitFactoryRepo) => { navigate(repoPath(r)); };
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -1813,7 +1811,7 @@ export function Repos() {
       {/* Detail */}
       {selected ? (
         <RepoDetail key={selected.id} repo={selected}
-          onDeleted={(id) => { setRepos(prev => prev.filter(r => r.id !== id)); setSelId(null); }}
+          onDeleted={(id) => { setRepos(prev => prev.filter(r => r.id !== id)); navigate('/app/codearmory_git_factory'); }}
           onChanged={fetchRepos} />
       ) : (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>

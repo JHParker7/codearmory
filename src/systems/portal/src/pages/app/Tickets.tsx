@@ -327,6 +327,11 @@ function TicketFormModal({ mode, ticket, boardId, defaultProject, statuses, prio
 /** Modal to create a new board (name + optional description/color). */
 function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
+  // A board belongs to the CURRENT project (the tickets service rejects a
+  // project-less board). The portal is already project-scoped, so tag the new
+  // board with the selected project's slug rather than showing a picker; if no
+  // project is selected ("all projects"), block create with a clear message.
+  const project = useAppSelector(s => s.project.current);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -334,10 +339,11 @@ function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; 
 
   const handleSubmit = async () => {
     if (!name.trim()) return;
+    if (!project) { setError('Select a project first — a board must belong to a project.'); return; }
     setSubmitting(true);
     setError(null);
     try {
-      onCreated(await createBoard(token, { name: name.trim(), description: description.trim() || undefined }));
+      onCreated(await createBoard(token, { name: name.trim(), description: description.trim() || undefined, project }));
     } catch (e: unknown) {
       setError((e as Error).message);
       setSubmitting(false);
@@ -363,9 +369,15 @@ function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; 
             <input value={description} onChange={e => setDescription(e.target.value)}
               style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' }} />
           </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>PROJECT</div>
+            <div style={{ fontFamily: T.mono, fontSize: 12, color: project ? T.text : T.red, background: T.cardHi, border: `1px solid ${T.border}`, padding: '8px 10px' }}>
+              {project || 'none selected — pick a project in the switcher first'}
+            </div>
+          </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={handleSubmit} disabled={!name.trim() || submitting}
-              style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!name.trim() || submitting) ? 0.6 : 1 }}>
+            <button onClick={handleSubmit} disabled={!name.trim() || submitting || !project}
+              style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!name.trim() || submitting || !project) ? 0.6 : 1 }}>
               {submitting ? '[ · · · ]' : '[ create board ]'}
             </button>
             <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '9px 14px', cursor: 'pointer' }}>cancel</button>

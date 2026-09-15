@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // Project scoping (see docs/projects/design.md). A pipeline may be filed into a
@@ -138,4 +139,56 @@ func checkProjectPermission(ctx context.Context, bearer, action, collection, slu
 		return false
 	}
 	return res.Authorized
+}
+
+// fetchProjectAncestors returns a project's ancestor chain [self, parent, …, root]
+// from gatekeeper's GET /projects/{id}/ancestors. Fails closed to nil.
+func fetchProjectAncestors(ctx context.Context, bearer, projectID string) []accessibleProject {
+	if bearer == "" || projectID == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/projects/"+projectID+"/ancestors", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", bearer)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		return nil
+	}
+	var out []accessibleProject
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// pipelineMayTargetProject is the PROJECT-ISOLATION gate: a pipeline filed into
+// project pipelineSlug may run against — and tag resources in — targetSlug ONLY when
+// targetSlug is pipelineSlug itself or a DESCENDANT of it (pipelineSlug is in
+// targetSlug's ancestor chain). So a bootstrap parent's pipeline (agentic-dev-flow)
+// may run for its child (demo), but a pipeline in an unrelated project (ops) cannot
+// touch demo — even though the run executes as the owner, who could. A pipeline with
+// no project (legacy, pre-enforcement) is unconstrained.
+func pipelineMayTargetProject(ctx context.Context, bearer, pipelineSlug, targetSlug string) bool {
+	pipelineSlug = strings.TrimSpace(pipelineSlug)
+	targetSlug = strings.TrimSpace(targetSlug)
+	if pipelineSlug == "" || targetSlug == "" || pipelineSlug == targetSlug {
+		return true
+	}
+	tp := resolveProjectSlug(ctx, bearer, targetSlug)
+	if tp == nil {
+		return false
+	}
+	for _, a := range fetchProjectAncestors(ctx, bearer, tp.ProjectID) {
+		if a.Slug == pipelineSlug {
+			return true
+		}
+	}
+	return false
 }

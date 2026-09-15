@@ -306,14 +306,33 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	// pipeline's parent. authorizeWorkflow above already confirmed the caller may run
 	// this pipeline; here we additionally require they may trigger within the target
 	// project, then tag the run with it (a local wf copy, so only the run's project moves).
+	// PROJECT ISOLATION: the pipeline's OWN project bounds where a run may operate.
+	// A run may target (attribute to, and tag resources in) only the pipeline's project
+	// or a DESCENDANT of it — so a bootstrap parent's pipeline runs for its children,
+	// but a pipeline in an unrelated project cannot reach across the tree. Checked here,
+	// at the entry point, because the run then executes as the owner (who could touch
+	// anything) — the pipeline's project, not the owner's grants, is the boundary.
+	pipelineProject := wf.Project
+	bearer := r.Header.Get("Authorization")
 	if tp := strings.TrimSpace(req.Project); tp != "" && tp != wf.Project {
-		bearer := r.Header.Get("Authorization")
+		if !pipelineMayTargetProject(ctx, bearer, pipelineProject, tp) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "project isolation: a pipeline in project "+pipelineProject+" cannot run for project "+tp+" (outside its project subtree)", http.StatusForbidden)
+			return
+		}
 		if p := resolveProjectSlug(ctx, bearer, tp); p != nil &&
 			checkProjectPermission(ctx, bearer, "triggerRun", "pipelines", p.Slug, wf.WorkflowID) {
 			wf.Project = p.Slug
 			wf.ProjectID = p.ProjectID
 			wf.ProjectNamespace = p.Namespace
 		}
+	}
+	// The project a run tags its resources with (inputs.project) must also stay in the
+	// pipeline's subtree, or an ops pipeline could still create demo resources by input.
+	if ip := strings.TrimSpace(inputs["project"]); ip != "" && !pipelineMayTargetProject(ctx, bearer, pipelineProject, ip) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project isolation: a pipeline in project "+pipelineProject+" cannot create resources in project "+ip+" (outside its project subtree)", http.StatusForbidden)
+		return
 	}
 
 	run, errMsg, code := startWorkflowRun(ctx, &wf, userID, orgID, inputs, 0, "")
@@ -412,6 +431,16 @@ func handleTriggerRunByBody(w http.ResponseWriter, r *http.Request) {
 	if msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
+	// PROJECT ISOLATION (sub-pipeline path): a sub-run may only tag resources in the
+	// sub-pipeline's own project or a descendant — so a parent orchestrator calling an
+	// inherited build pipeline for its child project (agentic-dev-flow → demo) is fine,
+	// but a pipeline in an unrelated project cannot be driven to create demo resources.
+	if ip := strings.TrimSpace(inputs["project"]); ip != "" && !pipelineMayTargetProject(ctx, r.Header.Get("Authorization"), wf.Project, ip) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project isolation: a pipeline in project "+wf.Project+" cannot create resources in project "+ip+" (outside its project subtree)", http.StatusForbidden)
 		return
 	}
 

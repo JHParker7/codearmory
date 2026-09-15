@@ -26,6 +26,7 @@ import { ServiceFrame } from './pages/app/ServiceFrame';
 import { Audit } from './pages/app/Audit';
 import { SettingsHub } from './pages/app/SettingsHub';
 import { BlacksmithRoles } from './pages/app/BlacksmithRoles';
+import { Notifications } from './pages/app/Notifications';
 import { Wiki } from './pages/app/Wiki';
 import { T } from './theme';
 
@@ -162,6 +163,10 @@ export function App() {
                   is what the sidebar, existing links and bookmarks already point at —
                   only what renders there changed (bundled page, no longer an iframe). */}
               <Route path="codearmory_git_factory" element={<Repos />} />
+              {/* Readable repo path, like other git hosts: /app/codearmory_git_factory/<owner>/<project>/<repo>
+                  (owner = the repo's git-factory namespace). Renders the same page, which resolves the
+                  segments to a repo; tab/pr stay query params. */}
+              <Route path="codearmory_git_factory/:owner/:project/:name" element={<Repos />} />
               <Route path="outposts" element={<Outposts />} />
             </Route>
             <Route path="gatekeeper" element={<Gatekeeper />} />
@@ -170,6 +175,7 @@ export function App() {
             <Route path="audit" element={<Audit />} />
             <Route path="settings" element={<SettingsHub />} />
             <Route path="blacksmith-roles" element={<BlacksmithRoles />} />
+            <Route path="notifications" element={<Notifications />} />
             {/* Generic iframe host for any registered, non-bundled service that
                 advertises a ui_path (e.g. blueprints, chaos, argo). Static routes
                 above out-rank this dynamic segment, so bundled pages always win. */}

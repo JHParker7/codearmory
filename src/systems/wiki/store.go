@@ -145,8 +145,10 @@ func (s *gitFactoryStore) repoID(ctx context.Context, project string) (string, e
 	}
 	err := s.gf(ctx, http.MethodPost, "/repos/by-path", map[string]string{"namespace": s.namespace, "name": name}, &re)
 	if errors.Is(err, errNotFound) {
-		// first use for this project — create the wiki repo (owned by the bot)
-		if cerr := s.gf(ctx, http.MethodPost, "/repos", map[string]string{"name": name, "visibility": "private"}, &re); cerr != nil {
+		// first use for this project — create the wiki repo (owned by the bot).
+		// Tag it with the project it serves: git-factory now rejects a project-less
+		// repo, and the wiki repo is a resource of that project (nothing is projectless).
+		if cerr := s.gf(ctx, http.MethodPost, "/repos", map[string]string{"name": name, "visibility": "private", "project": project}, &re); cerr != nil {
 			return "", fmt.Errorf("create wiki repo %q: %w", name, cerr)
 		}
 	} else if err != nil {

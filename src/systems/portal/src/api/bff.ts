@@ -498,6 +498,10 @@ export interface WorkflowRun {
   workflow_id: string;
   triggered_by: string;
   org_id?: string | null;
+  /** The project this run belongs to (its resources are tagged with it). Used to
+   * scope the runs list to the current project's chain, so a parent project never
+   * shows a child project's runs. */
+  project?: string | null;
   status: string;
   current_step?: number | null;
   /** The run that triggered this one (a workflows/trigger sub-run), and the nesting depth. */
@@ -768,7 +772,7 @@ export function listBoards(token: string) {
   return req<Board[]>('GET', '/tickets/boards', token);
 }
 
-export function createBoard(token: string, payload: { name: string; description?: string; color?: string }) {
+export function createBoard(token: string, payload: { name: string; description?: string; color?: string; project?: string }) {
   return req<Board>('POST', '/tickets/boards', token, payload);
 }
 
@@ -2461,4 +2465,67 @@ export function putBlacksmithRole(token: string, name: string, payload: Blacksmi
 
 export function deleteBlacksmithRole(token: string, name: string) {
   return req<void>('DELETE', `/blacksmith/roles/${encodeURIComponent(name)}`, token);
+}
+
+// ── Notifications ───────────────────────────────────────────────────────────
+// The notifications service delivers platform events (PR opened/merged, run
+// failed, …) to Slack/Discord/webhook/email. Conductor routes /notifications/*
+// to it with forward_auth, so these read/write the caller's own channels.
+// Shapes mirror src/systems/notifications/types.go.
+
+/** A provider is an integration type; config_keys drives which config fields a channel form shows. */
+export interface NotifProvider {
+  type: 'slack' | 'discord' | 'webhook' | 'email';
+  name: string;
+  description: string;
+  config_keys: string[];
+}
+
+/** A channel is one configured destination: a provider + its config + the event types it wants. */
+export interface NotifChannel {
+  id: string;
+  name: string;
+  provider: string;
+  config: Record<string, string>;
+  events: string[];
+  project?: string;
+  enabled: boolean;
+  created_by?: string;
+  org_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface NotifChannelInput {
+  name: string;
+  provider: string;
+  config: Record<string, string>;
+  events: string[];
+  project?: string;
+  enabled?: boolean;
+}
+
+export function listNotifProviders(token: string) {
+  return req<NotifProvider[]>('GET', '/notifications/providers', token);
+}
+
+export function listNotifChannels(token: string, project?: string) {
+  return req<NotifChannel[]>('GET', withProject('/notifications/channels', project), token);
+}
+
+export function createNotifChannel(token: string, payload: NotifChannelInput) {
+  return req<NotifChannel>('POST', '/notifications/channels', token, payload);
+}
+
+export function updateNotifChannel(token: string, id: string, payload: NotifChannelInput) {
+  return req<NotifChannel>('PUT', `/notifications/channels/${encodeURIComponent(id)}`, token, payload);
+}
+
+export function deleteNotifChannel(token: string, id: string) {
+  return req<void>('DELETE', `/notifications/channels/${encodeURIComponent(id)}`, token);
+}
+
+/** Fire a test delivery through the channel; resolves on delivered, throws with the provider error on failure. */
+export function testNotifChannel(token: string, id: string) {
+  return req<{ status: string; error?: string }>('POST', `/notifications/channels/${encodeURIComponent(id)}/test`, token);
 }
