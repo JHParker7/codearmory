@@ -1196,10 +1196,12 @@ containers:
       memory: 128Mi
   env:
     logLevel: info
-    # Optional base URL of an upstream registry to seed as the default on first
-    # boot. Leave empty to start with no registry and configure one or more at
-    # runtime via the /registries API.
-    registryUrl: ""
+    # Base URL of the upstream registry to seed as the default on first boot.
+    # Points at the in-cluster registry mirror so the Containers page has a
+    # registry without a manual /registries call (set live before; now persisted).
+    registryUrl: "http://codearmory-registry-mirror:5000"
+    # Display name for the seeded default registry.
+    registryName: "mirror"
     # Optional registry basic-auth username (password goes in secret.registryPassword).
     registryUsername: ""
     otelEndpoint: ""
