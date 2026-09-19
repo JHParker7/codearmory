@@ -4,9 +4,14 @@ import "time"
 
 const maxBodyBytes = 32 * 1024
 
-// Repository is a named image repository in the registry.
+// Repository is a named image repository in the registry. The portal drills into
+// tags with (Namespace, Name), so the catalog path is split: Namespace is the first
+// path component, Name is the rest, FullName is the whole path. Returning only the
+// full path as Name left the portal's Namespace empty and its tags URL malformed.
 type Repository struct {
-	Name string `json:"name"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	FullName  string `json:"full_name"`
 }
 
 // TagList is the list of tags for a repository.

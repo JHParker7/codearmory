@@ -69,6 +69,16 @@ function UsersTab() {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ email: '', username: '', firstname: '', lastname: '', password: '' });
   const [saving, setSaving] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
+
+  // The user id is a UUID an admin often needs to paste elsewhere (role_id lookups,
+  // bff calls, support). It used to render slice(0,8)+'…', which can't be read or
+  // copied in full — so show the whole id in a copy-on-click monospace field.
+  const copyUserId = async (id: string) => {
+    try { await navigator.clipboard?.writeText(id); } catch { /* clipboard may be blocked */ }
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 1200);
+  };
 
   const fetchUsers = useCallback(async () => {
     setLoading(true); setError(null);
@@ -209,7 +219,17 @@ function UsersTab() {
               </div>
             )}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
-              {([['user id', selectedUser.user_id.slice(0, 8) + '…'], ['joined', timeAgo(selectedUser.created_at) + ' ago'], ['updated', timeAgo(selectedUser.updated_at) + ' ago']] as [string, string][]).map(([k, v]) => (
+              <div style={{ gridColumn: '1 / -1', background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>user id</div>
+                  <button onClick={() => copyUserId(selectedUser.user_id)}
+                    style={{ background: 'transparent', border: `1px solid ${copiedId ? T.green : T.border}`, color: copiedId ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '1px 6px', cursor: 'pointer' }}>
+                    {copiedId ? '✓ copied' : 'copy'}
+                  </button>
+                </div>
+                <div title={selectedUser.user_id} style={{ fontFamily: T.mono, fontSize: 13, color: T.textHi, wordBreak: 'break-all', userSelect: 'all' }}>{selectedUser.user_id}</div>
+              </div>
+              {([['joined', timeAgo(selectedUser.created_at) + ' ago'], ['updated', timeAgo(selectedUser.updated_at) + ' ago']] as [string, string][]).map(([k, v]) => (
                 <div key={k} style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
                   <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>{k}</div>
                   <div style={{ fontFamily: T.mono, fontSize: 13, color: T.textHi }}>{v}</div>
@@ -1616,7 +1636,13 @@ export function Gatekeeper() {
   const visibleTabs = permissions
     ? ALL_TABS.filter(t => permissions[t.permission])
     : [];
-  const [tab, setTab] = useUrlState<Tab>('tab', 'users');
+  // Key must NOT be the bare 'tab' here: this page is also rendered nested inside
+  // SettingsHub (the "users & roles" tab), and SettingsHub owns ?tab= to pick which
+  // hub tab is showing. Sharing 'tab' meant clicking any inner tab (e.g. roles) wrote
+  // ?tab=roles, which SettingsHub read as an unknown hub tab and fell back to 'account'
+  // — so every gatekeeper tab but 'users' bounced the user to the Account page. A
+  // distinct key ('gk') keeps the two tab bars independent on the same rendered path.
+  const [tab, setTab] = useUrlState<Tab>('gk', 'users');
 
   useEffect(() => {
     if (visibleTabs.length > 0 && !visibleTabs.find(t => t.id === tab)) {

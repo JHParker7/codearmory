@@ -61,15 +61,68 @@ type Ticket struct {
 	BoardID   *string `json:"board_id,omitempty" gorm:"column:board_id"`
 	// ParentID links this ticket to a parent ticket (sub-ticket hierarchy). nil = a
 	// top-level ticket. Validated to exist, be accessible, and not form a cycle.
-	ParentID         *string         `json:"parent_id,omitempty" gorm:"column:parent_id"`
-	AssigneeID       *string         `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`
-	WorkflowID       *string         `json:"workflow_id,omitempty"        gorm:"column:workflow_id"`
-	RunID            *string         `json:"run_id,omitempty"             gorm:"column:run_id"`
-	ForgeExecutionID *string         `json:"forge_execution_id,omitempty" gorm:"column:forge_execution_id"`
-	Active           bool            `json:"-"                  gorm:"column:active;default:true"`
-	Comments         []TicketComment `json:"comments"           gorm:"-"`
-	CreatedAt        time.Time       `json:"created_at"         gorm:"column:created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"         gorm:"column:updated_at"`
+	ParentID         *string `json:"parent_id,omitempty" gorm:"column:parent_id"`
+	AssigneeID       *string `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`
+	WorkflowID       *string `json:"workflow_id,omitempty"        gorm:"column:workflow_id"`
+	RunID            *string `json:"run_id,omitempty"             gorm:"column:run_id"`
+	ForgeExecutionID *string `json:"forge_execution_id,omitempty" gorm:"column:forge_execution_id"`
+	Active           bool    `json:"-"                  gorm:"column:active;default:true"`
+	// Version is the optimistic-concurrency token, incremented by the database on
+	// every write. Clients read it as an ETag on GET and send it back as If-Match
+	// on PUT to say "apply this only if nobody else has changed the ticket since I
+	// read it"; a mismatch is a 412 rather than a silent overwrite.
+	//
+	// Without this, PUT is last-write-wins: two callers can both read a ticket,
+	// both write, and both believe they won. That is invisible when two people
+	// edit a ticket in the portal, and it is a correctness problem when several
+	// agent hosts race to claim the same work.
+	//
+	// If-Match is OPTIONAL. A caller that omits it keeps the previous
+	// last-write-wins behaviour, so this is additive and needs no client flag day.
+	Version  int64           `json:"version"            gorm:"column:version;not null;default:0"`
+	Comments []TicketComment `json:"comments"           gorm:"-"`
+	// DependsOn is the tickets that must be finished before this one can be
+	// worked. Unlike Comments it IS populated on listings — see loadDependencies
+	// for why that difference is deliberate.
+	DependsOn []TicketDependencyView `json:"depends_on"         gorm:"-"`
+	CreatedAt time.Time              `json:"created_at"         gorm:"column:created_at"`
+	UpdatedAt time.Time              `json:"updated_at"         gorm:"column:updated_at"`
+}
+
+// TicketDependency records that one ticket cannot proceed until another is
+// finished. Distinct from ParentID, which is hierarchy: a sub-ticket is PART OF
+// its parent, whereas a dependency is ORDERING between tickets that may live
+// anywhere. Conflating the two would mean either that work cannot be broken down
+// without implying an order, or that it cannot be ordered without implying
+// containment.
+//
+// The pair is the primary key, so declaring the same dependency twice is
+// idempotent rather than an error or a duplicate row.
+type TicketDependency struct {
+	TicketID    string    `json:"ticket_id"     gorm:"column:ticket_id;primaryKey"`
+	DependsOnID string    `json:"depends_on_id" gorm:"column:depends_on_id;primaryKey"`
+	CreatedBy   string    `json:"created_by"    gorm:"column:created_by;default:''"`
+	CreatedAt   time.Time `json:"created_at"    gorm:"column:created_at"`
+}
+
+// TableName sets the GORM table name for TicketDependency.
+func (TicketDependency) TableName() string { return "ticket_dependencies" }
+
+// TicketDependencyView is one entry in a ticket's depends_on list.
+//
+// It carries the blocker's STATUS, not just its id, so a caller can decide
+// whether the block is still in force without fetching every dependency
+// separately. That matters most to the agent runtimes, which poll a column and
+// would otherwise turn one listing into an N+1 storm.
+//
+// Status is deliberately raw rather than a "satisfied" boolean: boards define
+// their own columns, so only the caller knows which of its columns means done.
+// A dependency the caller cannot see is returned as an id with no title or
+// status — enough to know something blocks it, without leaking what.
+type TicketDependencyView struct {
+	TicketID string `json:"ticket_id"`
+	Title    string `json:"title,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 // TableName sets the GORM table name for Ticket.

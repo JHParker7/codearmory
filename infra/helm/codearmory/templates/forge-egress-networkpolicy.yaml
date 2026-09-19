@@ -85,4 +85,22 @@ spec:
         - protocol: TCP
           port: {{ .Values.registryMirror.port }}
     {{- end }}
+    # The in-cluster git-factory — same narrow hole. A dept/agent run pushes its work
+    # and opens a PR against dev here; the git wire is not conductor-routable and the
+    # proxy cannot dial its ClusterIP, so it is in forge's NO_PROXY and needs a scoped
+    # egress rule. Every operation is authenticated per user by the gatekeeper run-token
+    # the git: secret_ref mints, so reaching the service grants a sandbox nothing its
+    # own user could not already do.
+    {{- if and .Values.gitFactory.enabled .Values.forge.egressProxy.networkPolicy.allowGitFactory }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: git-factory
+      ports:
+        - protocol: TCP
+          port: {{ .Values.gitFactory.port }}
+    {{- end }}
 {{- end }}

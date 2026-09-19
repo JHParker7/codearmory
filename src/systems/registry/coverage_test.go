@@ -641,10 +641,10 @@ func TestReplaceServiceManifest(t *testing.T) {
 	}
 
 	var roleCount, epCount, actCount, grantCount int64
-	connect().Raw(`SELECT count(*) FROM service_roles WHERE service_id = ?`, id).Scan(&roleCount)              //nolint:errcheck
-	connect().Raw(`SELECT count(*) FROM service_endpoints WHERE service_id = ?`, id).Scan(&epCount)            //nolint:errcheck
-	connect().Raw(`SELECT count(*) FROM service_actions WHERE service_id = ?`, id).Scan(&actCount)             //nolint:errcheck
-	connect().Raw(`SELECT count(*) FROM service_default_grants WHERE service_id = ?`, id).Scan(&grantCount)    //nolint:errcheck
+	connect().Raw(`SELECT count(*) FROM service_roles WHERE service_id = ?`, id).Scan(&roleCount)           //nolint:errcheck
+	connect().Raw(`SELECT count(*) FROM service_endpoints WHERE service_id = ?`, id).Scan(&epCount)         //nolint:errcheck
+	connect().Raw(`SELECT count(*) FROM service_actions WHERE service_id = ?`, id).Scan(&actCount)          //nolint:errcheck
+	connect().Raw(`SELECT count(*) FROM service_default_grants WHERE service_id = ?`, id).Scan(&grantCount) //nolint:errcheck
 	if roleCount != 1 || epCount != 1 || actCount != 1 || grantCount != 1 {
 		t.Fatalf("counts roles=%d eps=%d actions=%d grants=%d, want 1 each", roleCount, epCount, actCount, grantCount)
 	}

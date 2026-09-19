@@ -465,6 +465,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 				Matrix:  ref.Matrix,
 				Scatter: ref.Scatter,
 				MapID:   ref.MapID,
+				LoopID:  ref.LoopID,
 			})
 			continue
 		}
@@ -491,7 +492,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 		// definition, so it is copied onto the local step copy like the name override.
 		s.AllowUnresolved = ref.AllowUnresolved
 		s.Permissions = ref.Permissions
-		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID})
+		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID, LoopID: ref.LoopID})
 	}
 	return result, nil
 }
@@ -1010,6 +1011,18 @@ func (sr WorkflowStepRun) SetStatus(_ context.Context, status string) {
 		        started_at = CASE WHEN ? = ? THEN CURRENT_TIMESTAMP ELSE started_at END
 		  WHERE step_run_id = ? AND ended_at IS NULL`,
 		status, status, StatusRunning, sr.StepRunID)
+}
+
+// SetLogs streams the backing action's stdout onto the step run WHILE IT RUNS, so
+// the run view shows an agent's reasoning and tool calls live rather than only when
+// the stage finishes (an agent step used to show nothing for the minutes it ran).
+// Display-only and best-effort: the terminal Complete() writes the authoritative
+// final logs, and this is guarded on ended_at IS NULL so a late poll cannot
+// overwrite a finished row.
+func (sr WorkflowStepRun) SetLogs(_ context.Context, logs string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — display-only; Complete writes the authoritative logs
+		`UPDATE workflow_step_runs SET logs = ? WHERE step_run_id = ? AND ended_at IS NULL`,
+		logs, sr.StepRunID)
 }
 
 // stepJob is one async job a step run is still waiting on: the catalog action that

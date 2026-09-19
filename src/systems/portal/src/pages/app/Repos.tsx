@@ -18,6 +18,7 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useUrlParam, useUrlState } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
@@ -30,13 +31,16 @@ import {
   listGitFactoryCommits, getGitFactoryCommit, compareGitFactoryRefs,
   getGitFactoryReadme, getGitFactoryTree, getGitFactoryBlob, writeGitFactoryBlob,
   listGitFactoryPulls, createGitFactoryPull, getGitFactoryPull, mergeGitFactoryPull, closeGitFactoryPull,
+  listGitFactoryPRComments, createGitFactoryPRComment, submitGitFactoryPRReview,
   listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
   listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
+  listRuns, listWorkflows, listUsers, getRun,
 } from '../../api/bff';
 import type {
   GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
   GitFactoryFileChange, GitFactoryTreeEntry, GitFactoryBlob, GitFactoryPull,
   GitFactoryPullDetail, GitFactoryProtection,
+  GitFactoryPRComment, WorkflowRun,
 } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
 import {
@@ -106,6 +110,23 @@ function errorMessage(e: unknown): string {
   return err?.message?.trim() || 'request failed';
 }
 
+/** Trim a string to n chars with an ellipsis, flattening whitespace for one-line labels. */
+function truncateText(s: string, n: number): string {
+  const flat = s.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
+}
+
+/** The automated author behind a commit, from the author email's domain suffix:
+ *  <role>@blacksmith.agent → a coding agent; <step>@forge.cicd → a CI/CD step. The
+ *  local part is the specific identity (the role or the step). Returns null for a
+ *  human commit (any other domain). Identity-based, not a parsed display name. */
+function commitAgent(email?: string): { local: string; kind: 'agent' | 'cicd' } | null {
+  const e = (email || '').trim().toLowerCase();
+  const m = /^([^@]+)@[a-z0-9._-]*\.(agent|cicd)$/.exec(e);
+  if (!m) return null;
+  return { local: m[1], kind: m[2] as 'agent' | 'cicd' };
+}
+
 /** Relative time that tolerates a missing/unparsable timestamp. */
 function ago(iso?: string | null): string {
   if (!iso) return 'never';
@@ -165,8 +186,8 @@ function Inline({ nodes }: { nodes: MdInline[] }) {
   );
 }
 
-/** Rendered markdown — the README, and any .md file opened in the reader. */
-function Markdown({ source }: { source: string }) {
+/** Rendered markdown — the README, any .md file opened in the reader, and the wiki. */
+export function Markdown({ source }: { source: string }) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
   const heading = (level: number, children: ReactNode, key: number) => {
     const size = [19, 16, 14, 13][level - 1] ?? 13;
@@ -391,12 +412,24 @@ function CreateRepo({ onCreated, onCancel }: { onCreated: (r: GitFactoryRepo) =>
 
 // ── code tab ─────────────────────────────────────────────────────────────────
 
-/** Icon glyph for a tree entry type. */
-function entryIcon(type: string): string {
-  if (type === 'dir') return '▸';
-  if (type === 'symlink') return '↳';
-  if (type === 'submodule') return '⊟';
-  return '·';
+/** Nerd Font glyph for a tree entry — folder/link/submodule by type, else by file extension.
+ *  Rendered inside a `.nf` span (see nerdfont.css); an unknown extension gets a generic file. */
+const FILE_GLYPHS: Record<string, number> = {
+  go: 0xe627, js: 0xe60c, jsx: 0xe60c, mjs: 0xe60c, cjs: 0xe60c,
+  ts: 0xe628, tsx: 0xe628, md: 0xe609, markdown: 0xe609,
+  json: 0xe60b, py: 0xe606, html: 0xe60e, htm: 0xe60e,
+  css: 0xe614, sh: 0xe691, bash: 0xe691, zsh: 0xe691,
+  yml: 0xe6a8, yaml: 0xe6a8, rs: 0xe7a8,
+};
+function entryIcon(type: string, name = ''): string {
+  if (type === 'dir') return String.fromCodePoint(0xf07b);       // folder
+  if (type === 'symlink') return String.fromCodePoint(0xf0c1);   // link
+  if (type === 'submodule') return String.fromCodePoint(0xe702); // git
+  const base = name.toLowerCase();
+  if (base === 'dockerfile' || base.endsWith('.dockerfile')) return String.fromCodePoint(0xe7b0);
+  if (base.endsWith('.lock') || base === 'go.sum') return String.fromCodePoint(0xf023);
+  const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
+  return String.fromCodePoint(FILE_GLYPHS[ext] ?? 0xf15b);       // generic file
 }
 
 const parentPath = (p: string) => p.split('/').slice(0, -1).join('/');
@@ -573,7 +606,7 @@ function CodeTab({ repo, refName }: { repo: GitFactoryRepo; refName: string }) {
               <button key={e.path}
                 onClick={() => { if (e.type === 'dir') setPath(e.path); else setFile(e.path); }}
                 style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11.5, padding: '6px 10px', cursor: 'pointer' }}>
-                <span style={{ width: 14, textAlign: 'center', color: e.type === 'dir' ? T.green : T.faint }}>{entryIcon(e.type)}</span>
+                <span className="nf" style={{ width: 16, fontSize: 13, color: e.type === 'dir' ? T.green : T.faint }}>{entryIcon(e.type, e.name)}</span>
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
                 {e.type !== 'dir' && <span style={{ color: T.faint, fontSize: 10.5 }}>{formatBytes(e.size)}</span>}
               </button>
@@ -836,6 +869,348 @@ function NewPull({ repo, branches, onCreated, onCancel }: {
   );
 }
 
+// ── pull-request review: checks, reviews, conversation ───────────────────────
+
+function statusTone(state: string): 'green' | 'red' | 'amber' | 'dim' {
+  if (state === 'success') return 'green';
+  if (state === 'failure' || state === 'error') return 'red';
+  if (state === 'pending') return 'amber';
+  return 'dim';
+}
+function statusColor(state: string): string {
+  if (state === 'success') return T.green;
+  if (state === 'failure' || state === 'error') return T.red;
+  if (state === 'pending') return T.amber;
+  return T.faint;
+}
+function reviewTone(state: string): 'green' | 'red' | 'dim' {
+  if (state === 'approved') return 'green';
+  if (state === 'changes_requested') return 'red';
+  return 'dim';
+}
+
+/** A titled card — the shared frame for the PR-detail review sections. */
+function Section({ title, children }: { title: ReactNode; children: ReactNode }) {
+  return (
+    <div style={{ border: `1px solid ${T.border}`, marginTop: 14 }}>
+      <div style={{ padding: '7px 11px', borderBottom: `1px solid ${T.border}`, background: T.cardHi, ...sectionLabel, marginBottom: 0 }}>{title}</div>
+      <div style={{ padding: 11 }}>{children}</div>
+    </div>
+  );
+}
+
+/** A node on the timeline's rail: a coloured dot on the vertical line, then content. */
+function Node({ color, children, card }: { color: string; children: ReactNode; card?: boolean }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: card ? '6px 0' : '5px 0' }}>
+      <div style={{ position: 'relative', width: 12, flex: 'none' }}>
+        <div style={{ position: 'absolute', left: -1, top: 3, width: 11, height: 11, borderRadius: '50%', background: T.bg, border: `2px solid ${color}`, boxSizing: 'border-box' }} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0, fontFamily: T.mono, fontSize: 11.5, color: T.dim, paddingTop: card ? 0 : 1 }}>{children}</div>
+    </div>
+  );
+}
+
+/** One PR event stream: opened, commits, comments, reviews, checks and the merge/close
+ *  lifecycle, interleaved in time order — the GitHub "Conversation" model — with a
+ *  composer. Commits come from listing the source ref limited to the ahead-of-target
+ *  count (git-factory has no PR-commits endpoint); comments load on their own, so the
+ *  stream fills in progressively. */
+function Timeline({ repo, number, pr, commitCount, reviews, status, canReview, onChanged }: {
+  repo: GitFactoryRepo; number: string; pr: GitFactoryPull; commitCount?: number;
+  reviews?: GitFactoryPullDetail['reviews']; status?: GitFactoryPullDetail['status'];
+  canReview: boolean; onChanged: () => void;
+}) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [comments, setComments] = useState<GitFactoryPRComment[] | null>(null);
+  const [commits, setCommits] = useState<GitFactoryCommit[] | null>(null);
+  const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const [wfNames, setWfNames] = useState<Record<string, string>>({});
+  const [wfSteps, setWfSteps] = useState<Record<string, number>>({}); // workflow_id → total step count, for the progress bar
+  const [nowTick, setNowTick] = useState(() => Date.now()); // ticks every 1s while a run is live, so the elapsed clock moves
+  const [userNames, setUserNames] = useState<Record<string, string>>({});
+  const [plannedTasks, setPlannedTasks] = useState<Record<string, string[]>>({}); // reviewer run_id → the fix tasks its map will run (in order)
+  const [error, setError] = useState<string | null>(null);
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setComments(null);
+    listGitFactoryPRComments(token, repo.id, number)
+      .then(list => { if (!cancelled) setComments(list ?? []); })
+      .catch(e => { if (!cancelled) setError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [token, repo.id, number, version]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!commitCount) { setCommits([]); return; }
+    // The source ref's top N commits are exactly the N it is ahead of target — the PR's commits.
+    listGitFactoryCommits(token, repo.id, { ref: pr.source_ref, limit: commitCount })
+      .then(pg => { if (!cancelled) setCommits(pg.commits ?? []); })
+      .catch(() => { if (!cancelled) setCommits([]); }); // commits are best-effort — the rest of the timeline stands without them
+    return () => { cancelled = true; };
+  }, [token, repo.id, pr.source_ref, commitCount, version]);
+
+  // The workflows this PR set off. Runs carry the PR identity in their inputs
+  // (repo + number, the provenance link), so a filter surfaces the whole automation
+  // chain: pr-review, and the fix-arm-c runs it fanned out. A fix run is the one that
+  // carries inputs.task (the finding it is fixing) — that discriminator avoids
+  // hard-coding workflow ids. Polled while any run is active so the live indicator moves.
+  useEffect(() => {
+    let cancelled = false;
+    const mine = (r: WorkflowRun) => {
+      const i = r.inputs || {};
+      return i.repo === repo.name && String(i.number ?? '') === String(number);
+    };
+    const load = () => listRuns(token)
+      .then(async all => {
+        if (cancelled) return;
+        const ours = (all ?? []).filter(mine);
+        setRuns(ours);
+        // For each reviewer flow (a run that others were spawned by — i.e. has children,
+        // or is the pr-review that carries no fix task), read how many fixes its map WILL
+        // run, from its extract step's tasks output, so the plan (incl. not-yet-started
+        // fixers) is visible. Best-effort, one extra fetch per reviewer flow.
+        const flows = ours.filter(r => !r.inputs?.task); // pr-review has no inputs.task; fix runs do
+        const planned: Record<string, string[]> = {};
+        await Promise.all(flows.map(async f => {
+          try {
+            const full = await getRun(token, f.run_id);
+            const ex = (full.step_runs || []).find(s => s.step_name.split(' [')[0] === 'extract');
+            let raw: unknown = ex?.output;
+            if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { /* not json */ } }
+            const tasksStr = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>).tasks : undefined;
+            if (typeof tasksStr === 'string') { try { const arr = JSON.parse(tasksStr); if (Array.isArray(arr)) planned[f.run_id] = arr.map(String); } catch { /* */ } }
+          } catch { /* best-effort */ }
+        }));
+        if (!cancelled) setPlannedTasks(planned);
+      })
+      .catch(() => { /* runs are best-effort — the timeline stands without them */ });
+    load();
+    const iv = setInterval(load, 8000); // cheap poll; keeps the in-progress indicator live
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [token, repo.name, number, version]);
+
+  // A 1s clock so a running workflow's elapsed time advances between the 8s run polls.
+  // Only ticks while something is actually live, so a settled PR view does no work.
+  useEffect(() => {
+    const anyLive = runs.some(r => r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval');
+    if (!anyLive) return;
+    const iv = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [runs]);
+
+  // workflow_id → name, so a run entry can read "pr-review" / "fix-arm-c" not a uuid.
+  useEffect(() => {
+    let cancelled = false;
+    listWorkflows(token)
+      .then(ws => {
+        if (cancelled) return;
+        setWfNames(Object.fromEntries((ws ?? []).map(w => [w.workflow_id, w.name])));
+        setWfSteps(Object.fromEntries((ws ?? []).map(w => [w.workflow_id, (w.steps ?? []).length])));
+      })
+      .catch(() => { /* names are best-effort; fall back to the short id */ });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  // gatekeeper user_id → username, so a comment/review/PR author shows the agent (or
+  // person) name in full — git-factory records authors as user_ids, which otherwise
+  // render as a truncated uuid.
+  useEffect(() => {
+    let cancelled = false;
+    listUsers(token)
+      .then(us => { if (!cancelled) setUserNames(Object.fromEntries((us ?? []).map(u => [u.user_id, u.username]))); })
+      .catch(() => { /* best-effort; fall back to the id */ });
+    return () => { cancelled = true; };
+  }, [token]);
+  const authorName = (id: string) => userNames[id] || id; // full, never truncated
+
+  const submitReview = async (state: string) => {
+    setBusy(state); setError(null);
+    try { await submitGitFactoryPRReview(token, repo.id, number, state, body); setBody(''); setVersion(v => v + 1); onChanged(); }
+    catch (e) { setError(errorMessage(e)); } finally { setBusy(null); }
+  };
+  const addComment = async () => {
+    if (!body.trim()) return;
+    setBusy('comment'); setError(null);
+    try { await createGitFactoryPRComment(token, repo.id, number, body); setBody(''); setVersion(v => v + 1); }
+    catch (e) { setError(errorMessage(e)); } finally { setBusy(null); }
+  };
+
+  const t = (iso: string) => new Date(iso).getTime();
+  const items: { t: number; key: string; node: ReactNode }[] = [];
+  items.push({ t: t(pr.created_at), key: '0opened', node: (
+    <Node color={T.green}><span style={{ color: T.textHi }}>{authorName(pr.author)}</span> opened this pull request · <span style={{ color: T.faint }}>{ago(pr.created_at)}</span></Node>
+  ) });
+  for (const c of commits ?? []) { const agent = commitAgent(c.author_email); items.push({ t: t(c.date), key: 'c' + c.sha, node: (
+    <Node color={T.dim}>
+      {/* Order: SHA, then the bot/cicd tag, then the commit message — the tag sits
+          between the sha and the subject so an automated commit is flagged up front. */}
+      <span style={{ color: T.green }}>{c.short}</span>{' '}
+      {agent && <><span title={`made by an automated ${agent.kind === 'cicd' ? 'CI/CD step' : 'agent'}, not a human`}
+            style={{ fontFamily: T.mono, fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 5px', border: `1px solid ${agent.kind === 'cicd' ? T.amber : T.blue}`, color: agent.kind === 'cicd' ? T.amber : T.blue, borderRadius: 3 }}>
+            {agent.kind === 'cicd' ? '⚙' : '🤖'} {agent.local}</span>{' '}</>}
+      <span style={{ color: T.text }}>{c.subject}</span>
+      {!agent && <span style={{ color: T.faint }}> · {c.author}</span>}
+      <span style={{ color: T.faint }}> · {ago(c.date)}</span>
+    </Node>
+  ) }); }
+  for (const s of (status?.statuses ?? [])) items.push({ t: t(s.created_at), key: 's' + s.id, node: (
+    <Node color={statusColor(s.state)}>
+      <Pill tone={statusTone(s.state)}>{s.state}</Pill> <span style={{ color: T.textHi }}>{s.context}</span>
+      {s.description && <span style={{ color: T.faint }}> · {s.description}</span>}
+      {s.target_url && <a href={s.target_url} target="_blank" rel="noreferrer" style={{ color: T.green, fontSize: 10, marginLeft: 6 }}>details ↗</a>}
+      <span style={{ color: T.faint }}> · {ago(s.created_at)}</span>
+    </Node>
+  ) });
+  for (const r of (reviews?.reviews ?? [])) items.push({ t: t(r.created_at), key: 'r' + r.id, node: (
+    <Node color={reviewTone(r.state) === 'green' ? T.green : reviewTone(r.state) === 'red' ? T.red : T.dim} card={!!r.body}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Pill tone={reviewTone(r.state)}>{r.state === 'changes_requested' ? 'changes requested' : r.state}</Pill>
+        <span style={{ color: T.textHi }}>{authorName(r.reviewer)}</span>
+        <span style={{ color: T.faint, fontSize: 10 }}>{ago(r.created_at)}</span>
+      </div>
+      {r.body && <div style={{ border: `1px solid ${T.border}`, background: T.bgAlt, padding: '4px 9px', marginTop: 5, color: T.text }}><Markdown source={r.body} /></div>}
+    </Node>
+  ) });
+  for (const c of (comments ?? [])) items.push({ t: t(c.created_at), key: 'm' + c.id, node: (
+    <Node color={T.blue} card>
+      <div style={{ border: `1px solid ${T.border}`, background: T.bgAlt }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${T.border}`, fontSize: 10.5 }}>
+          <span style={{ color: T.textHi, fontWeight: 600 }}>{authorName(c.author)}</span>
+          <span style={{ color: T.faint }}>commented · {ago(c.created_at)}</span>
+        </div>
+        <div style={{ padding: '2px 11px 6px' }}><Markdown source={c.body} /></div>
+      </div>
+    </Node>
+  ) });
+  // Workflow runs this PR triggered (via the provenance link). Each renders as a compact
+  // <workflow name> · <status> · <run id> entry. The fixers spawned by a reviewer flow are
+  // NESTED under it ("started by <flow>"), and the ones the map still WILL run — from the
+  // reviewer flow's planned count minus those already started — show as 'todo', so the whole
+  // fan-out plan is visible, not just what's begun. Running entries sort to the live end.
+  const stFor = (status: string) => status === 'completed' ? 'success'
+    : status === 'failed' || status === 'error' ? 'fail'
+    : status === 'pending' ? 'todo' : status === 'cancelled' ? 'cancelled' : status;
+  const toneFor = (st: string, running: boolean): 'green' | 'amber' | 'red' | 'dim' =>
+    st === 'success' ? 'green' : st === 'fail' ? 'red' : running ? 'amber' : 'dim';
+  const colorFor = (tone: string) => tone === 'green' ? T.green : tone === 'red' ? T.red : tone === 'amber' ? T.amber : T.dim;
+  const fmtDur = (ms: number) => {
+    if (!isFinite(ms) || ms < 0) ms = 0;
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${s % 60}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+  };
+  const runNode = (r: WorkflowRun, opts?: { child?: boolean; parentName?: string }) => {
+    const name = wfNames[r.workflow_id] || r.workflow_id.slice(0, 8);
+    const running = r.status === 'running' || r.status === 'pending' || r.status === 'awaiting_approval';
+    const st = stFor(r.status);
+    const tone = toneFor(st, running);
+    // Progress: steps done of the pipeline's total, and how long the run has been going.
+    // current_step advances as steps start; a finished run counts as all-done. total comes
+    // from the pipeline definition (wfSteps); 0 when the pipeline isn't loaded yet.
+    const total = wfSteps[r.workflow_id] ?? 0;
+    const done = r.status === 'completed' ? (total || (r.current_step ?? 0))
+      : Math.min(Math.max(r.current_step ?? 0, 0), total || Infinity);
+    const startMs = new Date(r.started_at || r.created_at).getTime();
+    const endMs = running ? nowTick : new Date(r.ended_at || r.started_at || r.created_at).getTime();
+    const elapsed = isFinite(startMs) ? fmtDur(endMs - startMs) : '';
+    const pct = total ? Math.round((done / total) * 100) : (running ? 100 : 0);
+    const showBar = total > 0 || running;
+    return (
+      <div style={{ marginLeft: opts?.child ? 18 : 0 }}>
+        <Node color={colorFor(tone)}>
+          {opts?.child && <span style={{ color: T.faint }}>↳ </span>}
+          <span style={{ color: T.textHi, fontWeight: 600 }}>{name}</span>
+          <span style={{ color: T.faint }}> · </span><Pill tone={tone}>{st}</Pill>
+          <span style={{ color: T.faint }}> · {r.run_id.slice(0, 8)}</span>
+          {opts?.parentName && <span style={{ color: T.faint, fontSize: 10 }}> · started by {opts.parentName}</span>}
+        </Node>
+        {showBar && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2, marginLeft: 14 }}>
+            <div style={{ width: 90, height: 4, borderRadius: 2, background: T.border, overflow: 'hidden', flexShrink: 0 }}
+              title={total ? `${done} of ${total} steps` : undefined}>
+              <div style={{ width: `${pct}%`, height: '100%', background: colorFor(tone), transition: 'width .3s' }} />
+            </div>
+            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
+              {total ? `${done}/${total} steps` : `${done} steps`}{elapsed && <> · {running ? '' : 'ran '}{elapsed}</>}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+  const childrenOf = (id: string) => runs.filter(r => r.parent_run_id === id);
+  const topRuns = runs.filter(r => !r.parent_run_id || !runs.some(p => p.run_id === r.parent_run_id));
+  for (const r of topRuns) {
+    const running = r.status === 'running' || r.status === 'pending';
+    const when = r.ended_at || r.started_at || r.created_at;
+    const kids = childrenOf(r.run_id);
+    const flowName = wfNames[r.workflow_id] || 'review';
+    // one timeline item per reviewer flow, carrying its nested fixers + the queued plan.
+    // Each planned fix the map WILL run but hasn't started — shown individually (not
+    // collapsed to a count) so the whole fan-out plan is visible. A planned task is
+    // "started" once a child fix run carries it as inputs.task.
+    const startedTasks = new Set(kids.map(k => typeof k.inputs?.task === 'string' ? k.inputs!.task as string : ''));
+    const queuedTasks = (plannedTasks[r.run_id] || []).filter(tk => !startedTasks.has(tk));
+    const findingOf = (task: string) => task.replace(/^Fix this review finding in the code \(at [^)]*\)\.\s*/, '').replace(/^Issue:\s*/, '');
+    items.push({ t: running ? Date.now() : t(when), key: 'w' + r.run_id, node: (
+      <div>
+        {runNode(r)}
+        {kids.map(k => <div key={k.run_id}>{runNode(k, { child: true, parentName: flowName })}</div>)}
+        {queuedTasks.map((tk, i) => (
+          <div key={'q' + i} style={{ marginLeft: 18 }}><Node color={T.dim}>
+            <span style={{ color: T.faint }}>↳ </span>
+            <span style={{ color: T.textHi, fontWeight: 600 }}>autofix</span>
+            <span style={{ color: T.faint }}> · </span><Pill tone="dim">todo</Pill>
+            <span style={{ color: T.faint }}> · queued by {flowName} · {truncateText(findingOf(tk), 80)}</span>
+          </Node></div>
+        ))}
+      </div>
+    ) });
+  }
+  if (pr.state === 'merged') items.push({ t: t(pr.updated_at), key: 'zmerged', node: (
+    <Node color={T.blue}><span style={{ color: T.blue }}>merged</span>{pr.merge_commit && <> as <span style={{ color: T.green }}>{pr.merge_commit.slice(0, 8)}</span></>} · <span style={{ color: T.faint }}>{ago(pr.updated_at)}</span></Node>
+  ) });
+  else if (pr.state === 'closed') items.push({ t: t(pr.updated_at), key: 'zclosed', node: (
+    <Node color={T.red}><span style={{ color: T.red }}>closed</span> · <span style={{ color: T.faint }}>{ago(pr.updated_at)}</span></Node>
+  ) });
+  items.sort((a, b) => a.t - b.t || a.key.localeCompare(b.key));
+
+  const loading = comments === null || commits === null;
+  return (
+    <Section title={<>timeline · {items.length} event{items.length === 1 ? '' : 's'}{loading && <span style={{ color: T.faint }}> · loading…</span>}</>}>
+      {error && <ErrorBox>{error}</ErrorBox>}
+      <div style={{ position: 'relative' }}>
+        <div style={{ position: 'absolute', left: 5, top: 8, bottom: 8, borderLeft: `1px solid ${T.border}` }} />
+        {items.map(it => <div key={it.key}>{it.node}</div>)}
+      </div>
+      <div style={{ marginTop: 12, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
+        <textarea value={body} onChange={e => setBody(e.target.value)} placeholder={canReview ? 'leave a comment, or comment with your review…' : 'add a comment…'} rows={3} style={{ ...input, resize: 'vertical' }} />
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+          {canReview && <>
+            <button onClick={() => submitReview('approved')} disabled={!!busy} style={{ ...primaryBtn, opacity: busy ? 0.5 : 1 }}>{busy === 'approved' ? '[ · · · ]' : '[ approve ]'}</button>
+            <button onClick={() => submitReview('changes_requested')} disabled={!!busy}
+              style={{ background: T.redSoft, border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer', opacity: busy ? 0.5 : 1 }}>
+              {busy === 'changes_requested' ? '[ · · · ]' : 'request changes'}
+            </button>
+          </>}
+          <button onClick={addComment} disabled={!!busy || !body.trim()}
+            style={{ ...(canReview ? ghostBtn : primaryBtn), padding: '5px 12px', fontSize: 11, opacity: (busy || !body.trim()) ? 0.5 : 1 }}>
+            {busy === 'comment' ? '[ · · · ]' : '[ comment ]'}
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 /** One pull request: metadata, merge state, review diff, and merge/close actions. */
 function PullDetail({ repo, number, onBack, onChanged }: {
   repo: GitFactoryRepo;
@@ -849,6 +1224,7 @@ function PullDetail({ repo, number, onBack, onChanged }: {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'merge' | 'close' | null>(null);
   const [version, setVersion] = useState(0);
+  const [showDiff, setShowDiff] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -933,9 +1309,19 @@ function PullDetail({ repo, number, onBack, onChanged }: {
         )}
       </div>
       {detail.files_error && <ErrorBox>could not summarise the changes — {detail.files_error}</ErrorBox>}
-      {detail.diff !== undefined
-        ? <DiffPanel files={detail.files} diff={detail.diff} />
-        : <Hint>the review diff is shown while a pull request is open</Hint>}
+      {detail.diff !== undefined && (
+        <div style={{ marginTop: 14 }}>
+          <button onClick={() => setShowDiff(v => !v)} style={{ ...ghostBtn, padding: '5px 12px', fontSize: 11 }}>
+            {showDiff ? '▾' : '▸'} files changed{detail.files ? ` (${detail.files.length})` : ''}
+          </button>
+          {showDiff && <div style={{ marginTop: 10 }}><DiffPanel files={detail.files} diff={detail.diff} /></div>}
+        </div>
+      )}
+      <Timeline
+        repo={repo} number={number} pr={pr} commitCount={detail.commits}
+        reviews={detail.reviews} status={detail.status}
+        canReview={open} onChanged={() => setVersion(v => v + 1)}
+      />
     </div>
   );
 }
@@ -1296,19 +1682,23 @@ function RepoDetail({ repo, onDeleted, onChanged }: {
 /** Repos route: the repository rail (list + create) beside the selected repo's detail. */
 export function Repos() {
   const token = useAppSelector(s => s.auth.token)!;
+  // Scope is EXACT-PROJECT: the selected project shows only its OWN repos, never a
+  // parent's or a child's (project isolation — no hierarchy inheritance).
   const project = useAppSelector(s => s.project.current);
   const [repos, setRepos] = useState<GitFactoryRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selId, setSelId] = useUrlParam('repo');
+  // The selected repo lives in the PATH now — /app/codearmory_git_factory/<owner>/<project>/<name>
+  // — so the URL reads like other git hosts instead of ?repo=<uuid>. owner is the repo's
+  // git-factory namespace (the same segment the clone URL uses), project its slug, name its
+  // name. tab/pr/ref/path/file/commit stay query params (managed by the child views).
+  const navigate = useNavigate();
+  const { owner: pOwner, project: pProject, name: pName } = useParams();
+  const repoPath = useCallback((r: GitFactoryRepo) =>
+    `/app/codearmory_git_factory/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.project || '-')}/${encodeURIComponent(r.name)}`, []);
   const [showCreate, setShowCreate] = useState(false);
+  const [query, setQuery] = useState('');
   const [railW, railHandle] = useResizableWidth('rail.repos.main', 260, { min: 200, max: 480 });
-  const [, setTab] = useUrlState<RepoTab>('tab', 'code');
-  const [, setRefName] = useUrlParam('ref');
-  const [, setPath] = useUrlParam('path');
-  const [, setFile] = useUrlParam('file');
-  const [, setPr] = useUrlParam('pr');
-  const [, setCommit] = useUrlParam('commit');
   // Guards the auto-select below so it only runs on the first load, leaving a
   // deliberate "nothing selected" alone afterwards.
   const seeded = useRef(false);
@@ -1328,32 +1718,34 @@ export function Repos() {
   useEffect(() => { fetchRepos(); }, [fetchRepos]);
 
   // The project switcher is a view filter across the portal; repos carry the same
-  // label, so an active project narrows this list too.
-  const visible = useMemo(
-    () => (project ? repos.filter(r => r.project === project) : repos),
-    [repos, project],
-  );
+  // label, so an active project narrows this list too. On top of that, the search
+  // box narrows by name/namespace, and the list is ordered most-recently-updated
+  // first so the repo you last touched is at the top.
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return repos
+      .filter(r => (project ? r.project === project : true))
+      .filter(r => !q || r.name.toLowerCase().includes(q) || (r.namespace ?? '').toLowerCase().includes(q))
+      .slice()
+      .sort((a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime());
+  }, [repos, project, query]);
 
-  const selected = visible.find(r => r.id === selId) ?? null;
+  // Resolve the path segments to a repo from all accessible repos (not just the
+  // project-filtered rail), so a deep link still resolves whatever the current scope.
+  const selected = repos.find(r => r.namespace === pOwner && (r.project || '-') === pProject && r.name === pName) ?? null;
 
   // Land on the first repo when nothing is selected, so the page opens on content
   // rather than an empty pane.
   useEffect(() => {
     if (seeded.current || loading) return;
     seeded.current = true;
-    if (!selId && visible.length) setSelId(visible[0].id);
-  }, [loading, visible, selId, setSelId]);
+    if (!pName && visible.length) navigate(repoPath(visible[0]), { replace: true });
+  }, [loading, visible, pName, navigate, repoPath]);
 
-  /** Open a repo, resetting the per-repo view state the URL carries. */
-  const open = (r: GitFactoryRepo) => {
-    setSelId(r.id);
-    setTab('code');
-    setRefName(null);
-    setPath(null);
-    setFile(null);
-    setPr(null);
-    setCommit(null);
-  };
+  /** Open a repo: navigate to its readable path. Landing on the bare repo path
+   *  clears the query string, which resets the per-repo view state (tab/ref/path/
+   *  file/pr/commit) the child views carry there. */
+  const open = (r: GitFactoryRepo) => { navigate(repoPath(r)); };
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -1367,6 +1759,15 @@ export function Repos() {
                 style={{ ...ghostBtn, background: showCreate ? T.greenSoft : 'transparent', borderColor: showCreate ? T.green : T.border, color: showCreate ? T.green : T.dim, padding: '3px 7px' }}>+</button>
               <button onClick={fetchRepos} title="refresh" style={{ ...ghostBtn, padding: '3px 7px' }}>↻</button>
             </div>
+          </div>
+          <div style={{ position: 'relative', margin: '8px 0 6px' }}>
+            <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', fontFamily: T.mono, fontSize: 11, color: T.faint, pointerEvents: 'none' }}>⌕</span>
+            <input value={query} onChange={e => setQuery(e.target.value)} placeholder="search repos…" spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', padding: '5px 22px 5px 22px', fontFamily: T.mono, fontSize: 11, color: T.text, background: T.bg, border: `1px solid ${T.border}`, borderRadius: 3, outline: 'none' }} />
+            {query && (
+              <button onClick={() => setQuery('')} title="clear" aria-label="clear search"
+                style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', background: 'transparent', border: 0, cursor: 'pointer', color: T.faint, fontFamily: T.mono, fontSize: 12, padding: '0 4px', lineHeight: 1 }}>×</button>
+            )}
           </div>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
             {visible.length > 0 && `${visible.length} repositor${visible.length === 1 ? 'y' : 'ies'}${project ? ` in ${project}` : ''}`}
@@ -1385,7 +1786,9 @@ export function Repos() {
             <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
           ) : visible.length === 0 ? (
             <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, lineHeight: 1.7 }}>
-              → no repositories{project ? ` in ${project}` : ''}<br />press + to create one
+              {query.trim()
+                ? <>→ no repositories match “{query.trim()}”</>
+                : <>→ no repositories{project ? ` in ${project}` : ''}<br />press + to create one</>}
             </div>
           ) : visible.map(r => {
             const isActive = selected?.id === r.id;
@@ -1407,7 +1810,7 @@ export function Repos() {
       {/* Detail */}
       {selected ? (
         <RepoDetail key={selected.id} repo={selected}
-          onDeleted={(id) => { setRepos(prev => prev.filter(r => r.id !== id)); setSelId(null); }}
+          onDeleted={(id) => { setRepos(prev => prev.filter(r => r.id !== id)); navigate('/app/codearmory_git_factory'); }}
           onChanged={fetchRepos} />
       ) : (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>

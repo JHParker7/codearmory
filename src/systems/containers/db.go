@@ -76,10 +76,41 @@ func connectRead() *gorm.DB {
 	return gormDBRead
 }
 
-// migrate creates the registries table on startup. No separate migration step —
-// matches the CREATE-on-boot pattern of the other services.
+// connectReadSafe returns the read connection WITHOUT os.Exit on failure, unlike
+// connectRead. The project-link lookups sit on the hot authorization path of every
+// repository request; a database blip there must degrade to "no project link"
+// (i.e. exactly the pre-project namespace-ownership decision) rather than crash the
+// service or 500 a read. It reuses an already-open connection and only attempts a
+// fresh dial when none exists yet.
+func connectReadSafe() (*gorm.DB, error) {
+	dbInitMu.Lock()
+	defer dbInitMu.Unlock()
+	if gormDBRead != nil {
+		return gormDBRead, nil
+	}
+	if gormDB != nil {
+		return gormDB, nil
+	}
+	readURL := secret("DATABASE_READ_URL")
+	if readURL == "" {
+		readURL = secretOrDefault("DATABASE_URL", defaultDSN)
+	}
+	conn, err := gorm.Open(postgres.Open(readURL), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, err
+	}
+	gormDBRead = conn
+	return gormDBRead, nil
+}
+
+// migrate creates the service's tables on startup. No separate migration step —
+// matches the CREATE-on-boot pattern of the other services. container_project_links
+// is additive: existing deployments gain an empty table and behave unchanged until
+// a repository is stamped into a project.
 func migrate() error {
-	return connect().AutoMigrate(&Registry{})
+	return connect().AutoMigrate(&Registry{}, &ProjectLink{})
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────

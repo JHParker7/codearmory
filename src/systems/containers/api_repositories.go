@@ -37,9 +37,23 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ?project=<slug> narrows the live catalog to the repositories linked to that
+	// project. Absent the param the full catalog is returned exactly as before, so
+	// this is purely additive. An unresolved or inaccessible slug yields no matches
+	// (the caller is not a member), never a widening.
+	if slug := r.URL.Query().Get("project"); slug != "" {
+		repos = filterByProject(ctx, r, slug, repos)
+	}
+
 	result := make([]Repository, len(repos))
-	for i, name := range repos {
-		result[i] = Repository{Name: name}
+	for i, full := range repos {
+		// Split on the first "/": namespace is the first path component, name the rest.
+		// The portal builds the tags URL from (namespace, name), so both must be set.
+		ns, name := "", full
+		if j := strings.Index(full, "/"); j >= 0 {
+			ns, name = full[:j], full[j+1:]
+		}
+		result[i] = Repository{Name: name, Namespace: ns, FullName: full}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -61,9 +75,9 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+	if !authorizeRepo(ctx, r, userID, orgID, "listTag", namespace, image) {
 		span.SetStatus(codes.Ok, "")
-		slog.WarnContext(ctx, "list tags: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		slog.WarnContext(ctx, "list tags: caller not authorized for namespace", "user_id", userID, "namespace", namespace)
 		http.Error(w, "repository not found", http.StatusNotFound)
 		return
 	}
@@ -90,9 +104,27 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The portal expects an ARRAY of tag objects ({name, digest, size?, pushed_at?}),
+	// not the Docker-registry {name, tags:[strings]} shape — rendering .map() over the
+	// object crashed the page. Enrich each tag with its manifest digest (needed for the
+	// React key and the delete-by-digest action); a per-tag manifest lookup that fails
+	// degrades to an empty digest rather than failing the whole list.
+	type tagEntry struct {
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+	}
+	out := make([]tagEntry, 0, len(tl.Tags))
+	for _, t := range tl.Tags {
+		e := tagEntry{Name: t}
+		if m, merr := reg.getManifest(ctx, name, t); merr == nil {
+			e.Digest = m.Digest
+		}
+		out = append(out, e)
+	}
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tl) //nolint:errcheck
+	json.NewEncoder(w).Encode(out) //nolint:errcheck
 }
 
 func handleGetManifest(w http.ResponseWriter, r *http.Request) {
@@ -110,9 +142,9 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+	if !authorizeRepo(ctx, r, userID, orgID, "getManifest", namespace, image) {
 		span.SetStatus(codes.Ok, "")
-		slog.WarnContext(ctx, "get manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		slog.WarnContext(ctx, "get manifest: caller not authorized for namespace", "user_id", userID, "namespace", namespace)
 		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}
@@ -167,9 +199,9 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+	if !authorizeRepo(ctx, r, userID, orgID, "deleteManifest", namespace, image) {
 		span.SetStatus(codes.Ok, "")
-		slog.WarnContext(ctx, "delete manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		slog.WarnContext(ctx, "delete manifest: caller not authorized for namespace", "user_id", userID, "namespace", namespace)
 		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}

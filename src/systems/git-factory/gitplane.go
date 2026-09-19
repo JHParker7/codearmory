@@ -279,11 +279,15 @@ func runPack(ctx context.Context, repoID string, svc gitService, body io.Reader,
 
 // commit is one entry of a repo's history, as rendered for the API.
 type commit struct {
-	SHA     string `json:"sha"`
-	Short   string `json:"short"`
-	Author  string `json:"author"`
-	Date    string `json:"date"` // RFC3339, straight from git
-	Subject string `json:"subject"`
+	SHA    string `json:"sha"`
+	Short  string `json:"short"`
+	Author string `json:"author"`
+	// AuthorEmail lets a client tell an automated agent's commit from a human's by the
+	// author identity itself (blacksmith authors agent commits under an agents.* domain),
+	// rather than parsing the display name.
+	AuthorEmail string `json:"author_email"`
+	Date        string `json:"date"` // RFC3339, straight from git
+	Subject     string `json:"subject"`
 }
 
 // commitLogSep is an ASCII unit separator: it cannot appear in any of the fields git
@@ -405,7 +409,7 @@ func listCommits(ctx context.Context, repoID string, q commitQuery) ([]commit, e
 	args := []string{"-C", dir, "log",
 		"--max-count=" + strconv.Itoa(q.Limit),
 		"--skip=" + strconv.Itoa(q.Skip),
-		"--format=%H" + commitLogSep + "%an" + commitLogSep + "%aI" + commitLogSep + "%s",
+		"--format=%H" + commitLogSep + "%an" + commitLogSep + "%aI" + commitLogSep + "%s" + commitLogSep + "%ae",
 	}
 	args = append(args, q.filterArgs()...)
 	args = append(args, q.ref(), "--")
@@ -424,15 +428,19 @@ func listCommits(ctx context.Context, repoID string, q commitQuery) ([]commit, e
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, commitLogSep, 4)
-		if len(f) != 4 {
+		f := strings.SplitN(line, commitLogSep, 5)
+		if len(f) < 4 {
 			continue
 		}
 		short := f[0]
 		if len(short) > 7 {
 			short = short[:7]
 		}
-		commits = append(commits, commit{SHA: f[0], Short: short, Author: f[1], Date: f[2], Subject: f[3]})
+		email := ""
+		if len(f) == 5 {
+			email = f[4]
+		}
+		commits = append(commits, commit{SHA: f[0], Short: short, Author: f[1], Date: f[2], Subject: f[3], AuthorEmail: email})
 	}
 	return commits, nil
 }
@@ -926,6 +934,54 @@ func commitDetailFor(ctx context.Context, repoID, rev string) (*commitDetail, er
 // errNoChange means an edit's content matched the file already there — no commit made.
 var errNoChange = errors.New("file is unchanged")
 
+// errBranchExists is returned by createBranch when the target branch already exists.
+var errBranchExists = errors.New("branch already exists")
+
+// createBranch creates refs/heads/<name> at the commit that <base> resolves to (base
+// defaults to the repo's HEAD branch). Create-only: the empty old-value on update-ref
+// makes it fail if the ref already exists, so it never moves an existing branch. Mirrors
+// commitFileChange's exec-git style. Returns the commit the new branch points at.
+func createBranch(ctx context.Context, repoID, name, base string) (string, error) {
+	dir, err := localDirFor(ctx, repoID)
+	if err != nil {
+		return "", err
+	}
+	if base == "" {
+		base = headBranch(ctx, repoID)
+	}
+	if base == "" {
+		return "", fmt.Errorf("no base ref (repo has no default branch)")
+	}
+	resolve := func(ref string) (string, bool) {
+		var b bytes.Buffer
+		c := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", ref+"^{commit}")
+		c.Stdout = &b
+		if c.Run() != nil {
+			return "", false
+		}
+		return strings.TrimSpace(b.String()), true
+	}
+	commit, ok := resolve(base)
+	if !ok {
+		commit, ok = resolve("refs/heads/" + base)
+	}
+	if !ok {
+		return "", fmt.Errorf("base ref %q not found", base)
+	}
+	// Create-only: the empty old-value makes update-ref refuse if the ref already exists.
+	var errBuf bytes.Buffer
+	uref := exec.CommandContext(ctx, gitBinary, "-C", dir, "update-ref", "refs/heads/"+name, commit, "")
+	uref.Stderr = &errBuf
+	if err := uref.Run(); err != nil {
+		if _, exists := resolve("refs/heads/" + name); exists {
+			return "", errBranchExists
+		}
+		return "", fmt.Errorf("create branch %s: %w: %s", name, err, strings.TrimSpace(errBuf.String()))
+	}
+	slog.InfoContext(ctx, "branch created", "Repo_id", repoID, "branch", name, "base", base, "commit", commit)
+	return commit, nil
+}
+
 // commitFileChange writes content to path on branch as a new commit — a normal
 // fast-forward, so branch protections that only block force-push/delete never apply. It
 // builds the tree in a throwaway index (the bare repo is only touched by the final CAS
@@ -936,11 +992,21 @@ func commitFileChange(ctx context.Context, repoID, branch, path, content, messag
 	if err != nil {
 		return "", err
 	}
+	orphan := false
 	var tipBuf bytes.Buffer
 	tipCmd := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", "refs/heads/"+branch+"^{commit}")
 	tipCmd.Stdout = &tipBuf
 	if err := tipCmd.Run(); err != nil {
-		return "", fmt.Errorf("branch %q not found", branch)
+		// The branch doesn't exist. If the repo has NO refs at all, this is the very first
+		// write — create the branch with an ORPHAN initial commit rather than 409. createRepo
+		// makes a bare, branchless repo, and a caller (e.g. the wiki writing the first page of
+		// a fresh <project>-wiki repo) reasonably expects "write a file to an empty repo" to
+		// just work instead of failing on a chicken-and-egg missing branch.
+		if hasNoRefs(ctx, dir) {
+			orphan = true
+		} else {
+			return "", fmt.Errorf("branch %q not found", branch)
+		}
 	}
 	tip := strings.TrimSpace(tipBuf.String())
 
@@ -967,7 +1033,10 @@ func commitFileChange(ctx context.Context, repoID, branch, path, content, messag
 	}
 	blob := strings.TrimSpace(blobBuf.String())
 
-	idx, err := os.CreateTemp("", "gf-idx-*")
+	// The temp index must live on a WRITABLE filesystem. The container runs with a
+	// read-only root (so /tmp, os.CreateTemp's default, is read-only); the repo dir is on
+	// the git storage volume, which is writable. Keep it beside the repo and clean it up.
+	idx, err := os.CreateTemp(dir, ".gf-idx-*")
 	if err != nil {
 		return "", err
 	}
@@ -976,7 +1045,14 @@ func commitFileChange(ctx context.Context, repoID, branch, path, content, messag
 	defer os.Remove(idxPath)
 	idxEnv := append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
 
-	rt := exec.CommandContext(ctx, gitBinary, "-C", dir, "read-tree", tip)
+	// Initialise the index: from the branch tip normally, or as a valid EMPTY index for
+	// the orphan first commit (skipping this leaves the temp file zero-byte, which is not a
+	// valid index and fails update-index with exit 128).
+	rtArgs := []string{"-C", dir, "read-tree", tip}
+	if orphan {
+		rtArgs = []string{"-C", dir, "read-tree", "--empty"}
+	}
+	rt := exec.CommandContext(ctx, gitBinary, rtArgs...)
 	rt.Env = idxEnv
 	if err := rt.Run(); err != nil {
 		return "", fmt.Errorf("read-tree: %w", err)
@@ -995,15 +1071,22 @@ func commitFileChange(ctx context.Context, repoID, branch, path, content, messag
 	}
 	tree := strings.TrimSpace(treeBuf.String())
 
-	var tipTreeBuf bytes.Buffer
-	tt := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", tip+"^{tree}")
-	tt.Stdout = &tipTreeBuf
-	if tt.Run() == nil && strings.TrimSpace(tipTreeBuf.String()) == tree {
-		return "", errNoChange
+	if !orphan {
+		var tipTreeBuf bytes.Buffer
+		tt := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", tip+"^{tree}")
+		tt.Stdout = &tipTreeBuf
+		if tt.Run() == nil && strings.TrimSpace(tipTreeBuf.String()) == tree {
+			return "", errNoChange
+		}
 	}
 
+	// commit-tree has a parent on a normal write; the orphan initial commit has none.
+	ctArgs := []string{"-C", dir, "commit-tree", tree, "-m", message}
+	if !orphan {
+		ctArgs = []string{"-C", dir, "commit-tree", tree, "-p", tip, "-m", message}
+	}
 	var commitBuf bytes.Buffer
-	ct := exec.CommandContext(ctx, gitBinary, "-C", dir, "commit-tree", tree, "-p", tip, "-m", message)
+	ct := exec.CommandContext(ctx, gitBinary, ctArgs...)
 	ct.Stdout = &commitBuf
 	ct.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME="+author, "GIT_AUTHOR_EMAIL="+author+"@codearmory.local",
@@ -1012,11 +1095,28 @@ func commitFileChange(ctx context.Context, repoID, branch, path, content, messag
 		return "", fmt.Errorf("commit-tree: %w", err)
 	}
 	commit := strings.TrimSpace(commitBuf.String())
-	if err := exec.CommandContext(ctx, gitBinary, "-C", dir, "update-ref", "refs/heads/"+branch, commit, tip).Run(); err != nil {
+	// Orphan: create the ref (2-arg form). Normal: compare-and-swap against the old tip.
+	uref := exec.CommandContext(ctx, gitBinary, "-C", dir, "update-ref", "refs/heads/"+branch, commit, tip)
+	if orphan {
+		uref = exec.CommandContext(ctx, gitBinary, "-C", dir, "update-ref", "refs/heads/"+branch, commit)
+	}
+	if err := uref.Run(); err != nil {
 		return "", fmt.Errorf("update %s (it moved — reload and retry): %w", branch, err)
+	}
+	if orphan {
+		// Point HEAD at the branch we just created so the repo's default branch is set and
+		// a subsequent clone checks it out.
+		_ = exec.CommandContext(ctx, gitBinary, "-C", dir, "symbolic-ref", "HEAD", "refs/heads/"+branch).Run()
 	}
 	slog.InfoContext(ctx, "file committed", "Repo_id", repoID, "branch", branch, "path", path, "commit", commit)
 	return commit, nil
+}
+
+// hasNoRefs reports whether a repo has no refs at all — i.e. it is freshly created and
+// empty, so the first file write must start an orphan branch rather than 409.
+func hasNoRefs(ctx context.Context, dir string) bool {
+	out, err := exec.CommandContext(ctx, gitBinary, "-C", dir, "for-each-ref", "--count=1").Output()
+	return err == nil && len(strings.TrimSpace(string(out))) == 0
 }
 
 // commitsBetween counts how many commits head is ahead of base.
@@ -1173,4 +1273,20 @@ func branchExists(ctx context.Context, repoID, branch string) bool {
 		return false
 	}
 	return exec.CommandContext(ctx, gitBinary, "-C", dir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil
+}
+
+// branchTip resolves a branch to its tip commit SHA, so a commit status can be keyed
+// to the head of a PR's source. Returns ("", false) if the branch does not exist.
+func branchTip(ctx context.Context, repoID, branch string) (string, bool) {
+	dir, err := localDirFor(ctx, repoID)
+	if err != nil || !branchNameRe.MatchString(branch) {
+		return "", false
+	}
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	cmd.Stdout = &buf
+	if cmd.Run() != nil {
+		return "", false
+	}
+	return strings.TrimSpace(buf.String()), true
 }

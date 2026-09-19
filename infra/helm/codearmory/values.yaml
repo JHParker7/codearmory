@@ -64,7 +64,7 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,events,outpost-gateway"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,events,outpost-gateway,wiki"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
@@ -280,7 +280,7 @@ forge:
     # When set to "docker", mount the Docker socket via forge.dockerSocket.
     runtime: kubernetes
     # Comma-separated list of container images forge is permitted to run.
-    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
+    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25,aquasec/trivy:latest,docker:27-dind"
     # Kubernetes namespace in which forge creates sandbox Jobs. Empty = the release
     # namespace (so a default install works with no prerequisite). Set a dedicated
     # namespace — which MUST already exist — for stronger isolation of sandbox Jobs.
@@ -443,6 +443,11 @@ forge:
       # cannot go through the proxy. Set false to deny it: builds then fall back to the
       # origin registry, which still works but re-exposes them to its rate limits.
       allowRegistryMirror: true
+      # Allow sandboxes to reach the in-cluster git-factory directly (that pod, on its
+      # port only) so a run can push its work and open a dev PR. Same narrow shape and
+      # same reason it cannot go through the proxy; every operation is authenticated per
+      # user by the gatekeeper run-token the git: secret_ref mints. Set false to deny it.
+      allowGitFactory: true
   # Run sandbox jobs in hardware-isolated kata (Cloud Hypervisor) microVMs. When true:
   #   - forge runs RUNTIME=kata (env.k8sRuntimeClass MUST be set to the VM-isolating
   #     RuntimeClass, e.g. "kata", or the chart fails to render);
@@ -503,6 +508,10 @@ forge:
       # pulling from the origin registry, which still works but re-exposes them to that
       # registry's rate limits.
       allowRegistryMirror: true
+      # Allow sandboxes to reach the in-cluster git-factory (that pod, on its port only)
+      # so a run can push its work and open a dev PR. Per-user authenticated by the
+      # gatekeeper run-token the git: secret_ref mints. Set false to deny it.
+      allowGitFactory: true
   # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
   # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
   # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:
@@ -750,6 +759,89 @@ tickets:
     caSecret: ""
     clientCertSecret: ""
     caBundle: ""
+
+# ── Wiki ─────────────────────────────────────────────
+# Project source-of-truth wiki. DB-less: content lives in git (git-factory today,
+# other git connector backends later), so history/diffs are git native. Model B —
+# the wiki owns its <project>-wiki repos through a bot identity, so callers need only
+# wiki permissions, never git-factory grants.
+wiki:
+  enabled: true
+  image:
+    repository: wiki
+    tag: ""
+  replicaCount: 1
+  port: 8110
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+    # The bot account the wiki logs in AS to write project wikis (owns the <project>-wiki
+    # repos in its own namespace). Provisioned once at deploy.
+    botEmail: "wiki-bot@codearmory.local"
+    # The namespace the bot owns, where <project>-wiki repos are created (the bot's own).
+    namespace: "codearmory-wiki-bot"
+  secret:
+    # Must match the wiki entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
+    # The wiki bot's login password (set at provisioning, when the bot account is created).
+    botPassword: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Blacksmith ───────────────────────────────────────
+# The agent harness: ONE general `blacksmith/agent` action the workflows engine
+# invokes to run a configured agent (roles are editable data in postgres). It
+# reaches ollama as a remote OpenAI endpoint on the workstation (the host bound
+# to the codearmory bridge, 192.168.67.1) and everything else over in-cluster
+# DNS. Runs the plan pipeline; the sandbox that executes agent code is a forge
+# execution, not a local container.
+blacksmith:
+  enabled: true
+  image:
+    repository: blacksmith
+    # A locally-built image loaded with `minikube image load
+    # ghcr.io/code-armory-app/blacksmith:dev`; imagePullPolicy IfNotPresent finds
+    # it without reaching ghcr.
+    tag: dev
+  replicaCount: 1
+  port: 8199
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  env:
+    logLevel: info
+    # OTLP collector on the workstation (deploy/observability docker-compose),
+    # reached over the codearmory bridge — grafana/tempo at localhost:3000/3200.
+    otelEndpoint: "http://192.168.67.1:4318"
+    # ollama on the workstation, reached over the codearmory bridge.
+    modelEndpoint: "http://192.168.67.1:11434/v1"
+    model: "qwen3.8:latest"
+    slots: 1
+    forgeEmail: "admin@blacksmith.invalid"
+    runnerImage: "golang:1.25"
+    runnerClass: "large"
+  secret:
+    # Secrets are NOT stored here — pass at install with
+    #   --set blacksmith.secret.registryServiceKey=... --set blacksmith.secret.forgePassword=...
+    # so no credential lands in the committed chart.
+    registryServiceKey: ""
+    forgePassword: ""
 
 # ── Events ───────────────────────────────────────────
 # Event collector + reactor (supersedes the former hooks service): services emit JSON events to
@@ -1050,6 +1142,11 @@ gitFactory:
     # shared-storage path, where the whole point is that the service cannot tell from
     # the inside that GIT_STORAGE_ROOT now means something entirely different.
     storagePreflight: ""
+    # Comma-separated gatekeeper user ids permitted as a createPull `author` override,
+    # letting a workflow attribute a PR it opens (with its own per-run repo credential)
+    # to a bot display account without that account holding any credential or grant.
+    # Attribution only; the real caller stays authorised and recorded. Empty disables it.
+    automationUsers: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
@@ -1118,10 +1215,12 @@ containers:
       memory: 128Mi
   env:
     logLevel: info
-    # Optional base URL of an upstream registry to seed as the default on first
-    # boot. Leave empty to start with no registry and configure one or more at
-    # runtime via the /registries API.
-    registryUrl: ""
+    # Base URL of the upstream registry to seed as the default on first boot.
+    # Points at the in-cluster registry mirror so the Containers page has a
+    # registry without a manual /registries call (set live before; now persisted).
+    registryUrl: "http://codearmory-registry-mirror:5000"
+    # Display name for the seeded default registry.
+    registryName: "mirror"
     # Optional registry basic-auth username (password goes in secret.registryPassword).
     registryUsername: ""
     otelEndpoint: ""
@@ -1401,9 +1500,16 @@ postgresql:
           CREATE DATABASE git_factory;
           CREATE DATABASE artifacts;
           CREATE DATABASE events;
-          -- containers is NOT stateless: it keeps per-tenant repositories and external
-          -- registry credentials in Postgres (containers/db.go). It was missing here
-          -- while "events" appeared twice, so a fresh install left the containers
-          -- service crash-looping on `database "containers" does not exist`.
-          CREATE DATABASE containers;
           CREATE DATABASE outpost_gateway;
+          CREATE DATABASE containers;
+          CREATE DATABASE blacksmith;
+    # Bumped from the subchart's 192Mi default: under load (registry ingesting the whole
+    # manifest on cold boot) 192Mi OOM-kills postgres, whose slow recovery then crash-loops
+    # registry AND git-factory until the DB warms. 1Gi keeps cold starts healthy.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi

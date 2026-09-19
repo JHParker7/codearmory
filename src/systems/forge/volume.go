@@ -97,10 +97,16 @@ type Volume struct {
 	Name       string `gorm:"column:name;not null"               json:"name"`
 	UserID     string `gorm:"column:user_id;not null"            json:"user_id"`
 	OrgID      string `gorm:"column:org_id;not null;default:''"  json:"org_id,omitempty"`
-	Backend    string `gorm:"column:backend;not null;default:default" json:"backend"`
-	SizeMB     int64  `gorm:"column:size_mb;not null"            json:"size_mb"`
-	Medium     string `gorm:"column:medium;not null;default:memory"   json:"medium"`
-	MountPath  string `gorm:"column:mount_path;not null;default:/workspace" json:"mount_path"`
+	// Project/ProjectID/ProjectNamespace mirror Lease's: a slug that resolves to a
+	// real gatekeeper project widens access to its members, otherwise it stays a
+	// free-text label and access stays governed by UserID.
+	Project          string `gorm:"column:project;not null;default:''"           json:"project,omitempty"`
+	ProjectID        string `gorm:"column:project_id;not null;default:''"        json:"project_id,omitempty"`
+	ProjectNamespace string `gorm:"column:project_namespace;not null;default:''" json:"project_namespace,omitempty"`
+	Backend          string `gorm:"column:backend;not null;default:default" json:"backend"`
+	SizeMB           int64  `gorm:"column:size_mb;not null"            json:"size_mb"`
+	Medium           string `gorm:"column:medium;not null;default:memory"   json:"medium"`
+	MountPath        string `gorm:"column:mount_path;not null;default:/workspace" json:"mount_path"`
 	// Status is active until the volume is torn down; a deleted row is kept briefly
 	// only so a double-delete is a no-op. Only active volumes count against the cap.
 	Status    string    `gorm:"column:status;not null;default:active"   json:"status"`
@@ -136,6 +142,9 @@ type createVolumeRequest struct {
 	MountPath   string `json:"mount_path"` // default /workspace
 	RunnerClass string `json:"runner_class"`
 	Backend     string `json:"backend"`
+	// Project is an optional gatekeeper project slug; when it resolves, the volume is
+	// filed into that project and ProjectID/ProjectNamespace are stamped from it.
+	Project string `json:"project,omitempty"`
 }
 
 // VolumeSpec is what a runtime needs to materialise a volume; the runtime is
@@ -192,9 +201,9 @@ type resolvedMount struct {
 // resolveVolumeMounts turns an execution's requested VolumeMounts into concrete
 // mounts for the runtime, applying the default mount path. Both the docker and
 // kubernetes runtimes share it so the two cannot derive resource names differently.
-func resolveVolumeMounts(exec Execution) []resolvedMount {
-	out := make([]resolvedMount, 0, len(exec.Volumes))
-	for _, m := range exec.Volumes {
+func resolveVolumeMounts(mounts []VolumeMount) []resolvedMount {
+	out := make([]resolvedMount, 0, len(mounts))
+	for _, m := range mounts {
 		path := m.MountPath
 		if path == "" {
 			path = defaultVolumeMountPath

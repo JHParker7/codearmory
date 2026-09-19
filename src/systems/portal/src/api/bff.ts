@@ -349,6 +349,8 @@ export interface WorkflowStepRef {
   /** The map region this step belongs to. Mutually exclusive with
    * matrix/scatter, which are the step's own fan-out. */
   map_id?: string;
+  /** The loop this step belongs to. Mutually exclusive with map_id/matrix/scatter. */
+  loop_id?: string;
 }
 
 /** A directed edge between two steps, identified by step name — the workflows API's
@@ -383,6 +385,25 @@ export interface WorkflowMapDef {
   size_mb?: number;
   medium?: string;
   outputs?: string[];
+}
+
+/** A loop: a subgraph (steps sharing loop_id) repeated SEQUENTIALLY, in place, on the
+ * one shared volume, until `until` holds or `limit` iterations run (hard max 50). The
+ * retry/converge primitive — unlike a map it does not fan out or clone. The workflows
+ * API's LoopDef. */
+export interface WorkflowLoopDef {
+  id: string;
+  /** Max iterations, clamped to [1, 50]. */
+  limit: number;
+  /** Exit condition — a route expression (steps.NAME.status/.output/.json.FIELD). The
+   * loop stops the first time it is true; empty means run exactly `limit` times. */
+  until?: string;
+  /** Optional: binds the 1-based iteration number for the body as ${loop.<var>}. */
+  var?: string;
+  /** Optional: nests this loop inside the named loop (an inner loop's whole body is
+   * one step of the parent's body). Used by the canvas to draw the outer loop's box
+   * around its whole subtree and the inner loop as a distinct nested box. */
+  parent?: string;
 }
 
 /** A run parameter a pipeline declares. `default` is applied when the trigger omits
@@ -437,6 +458,8 @@ export interface Workflow {
   routes?: WorkflowRoute[];
   /** The map regions steps join via map_id. */
   maps?: WorkflowMapDef[];
+  /** The loops steps join via loop_id. */
+  loops?: WorkflowLoopDef[];
   /** Mirrors every run of this pipeline into a ticket (opt-in). The editor has no UI
    * for it, so it is carried through a save unchanged — dropping it would silently
    * turn mirroring off for a pipeline nobody meant to change. */
@@ -475,8 +498,15 @@ export interface WorkflowRun {
   workflow_id: string;
   triggered_by: string;
   org_id?: string | null;
+  /** The project this run belongs to (its resources are tagged with it). Used to
+   * scope the runs list to the current project's chain, so a parent project never
+   * shows a child project's runs. */
+  project?: string | null;
   status: string;
   current_step?: number | null;
+  /** The run that triggered this one (a workflows/trigger sub-run), and the nesting depth. */
+  parent_run_id?: string | null;
+  depth?: number | null;
   inputs?: Record<string, unknown> | null;
   /** Declared pipeline outputs resolved from step outputs at completion. */
   outputs?: Record<string, string> | null;
@@ -502,8 +532,14 @@ export function listWorkflowRuns(token: string, workflowId: string) {
   return req<WorkflowRun[]>('GET', `/workflows/runs?workflow_id=${workflowId}`, token);
 }
 
-export function triggerWorkflow(token: string, workflowId: string, inputs?: Record<string, unknown>) {
-  return req<WorkflowRun>('POST', `/workflows/pipelines/${workflowId}/runs`, token, inputs ? { inputs } : {});
+export function triggerWorkflow(token: string, workflowId: string, inputs?: Record<string, unknown>, project?: string) {
+  // `project` attributes the run to the current (possibly child) project so a run of an
+  // INHERITED pipeline shows under the project it was triggered in, not the pipeline's
+  // parent. The server honours it only when the caller may trigger there.
+  const body: Record<string, unknown> = {};
+  if (inputs) body.inputs = inputs;
+  if (project) body.project = project;
+  return req<WorkflowRun>('POST', `/workflows/pipelines/${workflowId}/runs`, token, body);
 }
 
 export function listRuns(token: string) {
@@ -723,6 +759,8 @@ export interface Board {
   position: number;
   created_by: string;
   org_id?: string | null;
+  /** The project slug this board belongs to (for project-scoped filtering / inheritance). */
+  project?: string;
   created_at: string;
   updated_at: string;
   /** Server-computed ticket tallies for this board: open = not resolved/closed, total = all active. */
@@ -734,7 +772,7 @@ export function listBoards(token: string) {
   return req<Board[]>('GET', '/tickets/boards', token);
 }
 
-export function createBoard(token: string, payload: { name: string; description?: string; color?: string }) {
+export function createBoard(token: string, payload: { name: string; description?: string; color?: string; project?: string }) {
   return req<Board>('POST', '/tickets/boards', token, payload);
 }
 
@@ -1046,7 +1084,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[]; timeout_secs?: number },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; loops?: WorkflowLoopDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[]; timeout_secs?: number },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -1054,7 +1092,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[]; timeout_secs: number }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; loops: WorkflowLoopDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[]; timeout_secs: number }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }
@@ -1468,6 +1506,9 @@ export interface GitFactoryCommit {
   sha: string;
   short: string;
   author: string;
+  /** Author email — its domain suffix identifies an automated author:
+   *  <role>@blacksmith.agent (a coding agent) or <step>@forge.cicd (a CI/CD step). */
+  author_email?: string;
   date: string;
   subject: string;
 }
@@ -1559,6 +1600,50 @@ export interface GitFactoryMergeCheck {
   reason?: string;
 }
 
+/** A conversation comment on a pull request. */
+export interface GitFactoryPRComment {
+  id: string;
+  repo_id: string;
+  pull_id: string;
+  author: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A review verdict: `approved` | `changes_requested` | `commented`. */
+export interface GitFactoryPRReview {
+  id: string;
+  repo_id: string;
+  pull_id: string;
+  reviewer: string;
+  state: string;
+  body?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The merge-relevant summary of a PR's reviews (author self-approval excluded). */
+export interface GitFactoryReviewDecision {
+  approvals: number;
+  changes_requested: boolean;
+  reviews: number;
+}
+
+/** One check's verdict on a commit: `pending` | `success` | `failure` | `error`. */
+export interface GitFactoryCommitStatus {
+  id: string;
+  repo_id: string;
+  sha: string;
+  context: string;
+  state: string;
+  description?: string;
+  target_url?: string;
+  creator: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** A pull request plus its review payload — present only while the PR is open. */
 export interface GitFactoryPullDetail {
   pull_request: GitFactoryPull;
@@ -1567,6 +1652,10 @@ export interface GitFactoryPullDetail {
   diff?: string;
   commits?: number;
   merge?: GitFactoryMergeCheck;
+  /** The checks reported on the PR head commit (combined worst-first). */
+  status?: { sha: string; state: string; statuses: GitFactoryCommitStatus[] | null };
+  /** The review verdict, whether the target gates on it, and the full history. */
+  reviews?: { decision: GitFactoryReviewDecision; required: boolean; reviews: GitFactoryPRReview[] | null };
 }
 
 /** Who a repo is shared with: the owner's user id plus one row per (user, level). */
@@ -1709,6 +1798,25 @@ export function mergeGitFactoryPull(token: string, id: string, number: number | 
 
 export function closeGitFactoryPull(token: string, id: string, number: number | string) {
   return req<GitFactoryPull>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/close`, token);
+}
+
+export function listGitFactoryPRComments(token: string, id: string, number: number | string) {
+  return req<GitFactoryPRComment[] | null>('GET', `/codearmory_git_factory/repos/${id}/pulls/${number}/comments`, token);
+}
+
+export function createGitFactoryPRComment(token: string, id: string, number: number | string, body: string) {
+  return req<GitFactoryPRComment>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/comments`, token, { body });
+}
+
+/** Submit a review. `state` is `approved` | `changes_requested` | `commented`. */
+export function submitGitFactoryPRReview(
+  token: string,
+  id: string,
+  number: number | string,
+  state: string,
+  body?: string,
+) {
+  return req<GitFactoryPRReview>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/reviews`, token, { state, body: body ?? '' });
 }
 
 export function listGitFactoryCollaborators(token: string, id: string) {
@@ -2017,6 +2125,60 @@ export interface RegisteredService {
   ui_path?: string;
 }
 
+// ── Wiki ─────────────────────────────────────────────
+// The project source-of-truth wiki. Registered as `wiki`, so every route below is
+// conductor's `/wiki/projects/{project}/...`. Content lives in git (the service is a
+// facade), so a page is metadata + a body and history is git commits.
+export type WikiPageType =
+  | 'overview' | 'architecture' | 'contract' | 'model'
+  | 'service' | 'component' | 'decision' | 'ticket';
+
+export interface WikiPageMeta {
+  id: string;
+  path: string;
+  type: WikiPageType;
+  stack?: string;
+  format: string;
+  title: string;
+  status: string;
+  version: number;
+  related?: string[];
+  updated_at: string;
+  updated_by?: string;
+}
+export interface WikiPage extends WikiPageMeta { content: string; }
+export interface WikiManifest { project: string; pages: WikiPageMeta[] | null; version_tag?: string; updated_at: string; }
+export interface WikiCommit { sha: string; subject: string; author?: string; date: string; }
+export interface WikiPagePayload {
+  type: WikiPageType; stack?: string; format?: string; title: string;
+  status?: string; content: string; related?: string[]; path?: string;
+}
+
+/** The project's page index (manifest) — the machine index used for read-scoping. */
+/** `ref` reads a plan branch's version of the index (for reviewing/refining a plan PR). */
+export async function listWikiPages(token: string, project: string, ref?: string): Promise<WikiManifest> {
+  const q = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  return req<WikiManifest>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages${q}`, token);
+}
+/** `ref` reads a plan branch's version of the page. */
+export async function getWikiPage(token: string, project: string, id: string, ref?: string): Promise<WikiPage> {
+  const q = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  return req<WikiPage>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}${q}`, token);
+}
+/** Create or update a page (a new git version). `branch` writes to a plan branch (the
+ * change lands in the plan PR for review) instead of main. */
+export async function putWikiPage(token: string, project: string, id: string, payload: WikiPagePayload, branch?: string): Promise<WikiPage> {
+  const body = branch ? { ...payload, branch } : payload;
+  return req<WikiPage>('PUT', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token, body);
+}
+export async function deleteWikiPage(token: string, project: string, id: string): Promise<void> {
+  return req<void>('DELETE', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token);
+}
+export async function getWikiHistory(token: string, project: string, id: string): Promise<WikiCommit[]> {
+  const r = await req<{ commits: WikiCommit[] }>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}/history`, token);
+  return r.commits ?? [];
+}
+
 /** Fetch conductor's live routing table (the services currently registered/routable), flattened to the bare array. */
 export async function listRegisteredServices(token: string): Promise<RegisteredService[]> {
   const res = await req<{ services: RegisteredService[] }>('GET', '/services', token);
@@ -2174,6 +2336,8 @@ export interface Project {
   viewer_role_id: string;
   developer_role_id: string;
   admin_role_id: string;
+  /** Parent project id in the project tree, or null/absent for a top-level (root) project. */
+  parent_id?: string | null;
   /** The caller's tier on this project — present on the accessible listing, absent on owned/single reads. */
   tier?: ProjectTier;
 }
@@ -2196,13 +2360,24 @@ export function listOwnedProjects(token: string) {
   return req<Project[]>('GET', '/gatekeeper/projects', token);
 }
 
-/** Create a project. `slug` must match ^[a-z0-9][a-z0-9-]{0,62}$. */
-export function createProject(token: string, slug: string, name: string) {
-  return req<Project>('POST', '/gatekeeper/projects', token, { slug, name });
+/** Create a project. `slug` must match ^[a-z0-9][a-z0-9-]{0,62}$. `parent` is an
+ * existing project SLUG to nest under (its subtree bounds what pipelines may target);
+ * omit for a top-level project. */
+export function createProject(token: string, slug: string, name: string, parent?: string) {
+  return req<Project>('POST', '/gatekeeper/projects', token, { slug, name, ...(parent ? { parent } : {}) });
 }
 
 export function getProject(token: string, id: string) {
   return req<Project>('GET', `/gatekeeper/projects/${id}`, token);
+}
+
+/**
+ * The project's ancestor chain: [self, parent, …root]. Used to display inherited
+ * resources — a child shows its own resources plus those of every project in this
+ * chain. Membership is checked only on the requested (child) project.
+ */
+export function getProjectAncestors(token: string, id: string) {
+  return req<Project[]>('GET', `/gatekeeper/projects/${id}/ancestors`, token);
 }
 
 export function deleteProject(token: string, id: string) {
@@ -2250,4 +2425,115 @@ export async function fetchProjectLabels(token: string): Promise<string[]> {
     }
   }
   return [...labels].sort();
+}
+
+// ── Blacksmith ──────────────────────────────────────────────────────────────
+// Blacksmith is a host-registered service; conductor reverse-proxies /blacksmith/*
+// to it, so these read/write the agent ROLE definitions a workflow picks by name
+// on the blacksmith/agent action. Shapes mirror internal/roles.Role.
+
+export interface BlacksmithGuard {
+  kind: 'allow_all' | 'deny_all' | 'no_tests' | 'only_ext' | 'only_basenames' | 'both';
+  exts?: string[];
+  names?: string[];
+  a?: BlacksmithGuard;
+  b?: BlacksmithGuard;
+}
+
+export interface BlacksmithRole {
+  name: string;
+  prompt: string;
+  class: string;
+  tools: string[];
+  guard: BlacksmithGuard | null;
+  ticket_kind: string;
+  check: string;
+  rewrite_whole: boolean;
+  attempt_timeout_secs: number;
+  respins: number;
+  own_check: boolean;
+  seed_known: boolean;
+  max_iterations: number;
+  temperature: number;
+  max_tokens: number;
+}
+
+export function listBlacksmithRoles(token: string) {
+  return req<BlacksmithRole[]>('GET', '/blacksmith/roles', token);
+}
+
+export function getBlacksmithRole(token: string, name: string) {
+  return req<BlacksmithRole>('GET', `/blacksmith/roles/${encodeURIComponent(name)}`, token);
+}
+
+/** Create or replace a role. The URL name is authoritative; the body carries the rest. */
+export function putBlacksmithRole(token: string, name: string, payload: BlacksmithRole) {
+  return req<BlacksmithRole>('PUT', `/blacksmith/roles/${encodeURIComponent(name)}`, token, payload);
+}
+
+export function deleteBlacksmithRole(token: string, name: string) {
+  return req<void>('DELETE', `/blacksmith/roles/${encodeURIComponent(name)}`, token);
+}
+
+// ── Notifications ───────────────────────────────────────────────────────────
+// The notifications service delivers platform events (PR opened/merged, run
+// failed, …) to Slack/Discord/webhook/email. Conductor routes /notifications/*
+// to it with forward_auth, so these read/write the caller's own channels.
+// Shapes mirror src/systems/notifications/types.go.
+
+/** A provider is an integration type; config_keys drives which config fields a channel form shows. */
+export interface NotifProvider {
+  type: 'slack' | 'discord' | 'webhook' | 'email';
+  name: string;
+  description: string;
+  config_keys: string[];
+}
+
+/** A channel is one configured destination: a provider + its config + the event types it wants. */
+export interface NotifChannel {
+  id: string;
+  name: string;
+  provider: string;
+  config: Record<string, string>;
+  events: string[];
+  project?: string;
+  enabled: boolean;
+  created_by?: string;
+  org_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface NotifChannelInput {
+  name: string;
+  provider: string;
+  config: Record<string, string>;
+  events: string[];
+  project?: string;
+  enabled?: boolean;
+}
+
+export function listNotifProviders(token: string) {
+  return req<NotifProvider[]>('GET', '/notifications/providers', token);
+}
+
+export function listNotifChannels(token: string, project?: string) {
+  return req<NotifChannel[]>('GET', withProject('/notifications/channels', project), token);
+}
+
+export function createNotifChannel(token: string, payload: NotifChannelInput) {
+  return req<NotifChannel>('POST', '/notifications/channels', token, payload);
+}
+
+export function updateNotifChannel(token: string, id: string, payload: NotifChannelInput) {
+  return req<NotifChannel>('PUT', `/notifications/channels/${encodeURIComponent(id)}`, token, payload);
+}
+
+export function deleteNotifChannel(token: string, id: string) {
+  return req<void>('DELETE', `/notifications/channels/${encodeURIComponent(id)}`, token);
+}
+
+/** Fire a test delivery through the channel; resolves on delivered, throws with the provider error on failure. */
+export function testNotifChannel(token: string, id: string) {
+  return req<{ status: string; error?: string }>('POST', `/notifications/channels/${encodeURIComponent(id)}/test`, token);
 }

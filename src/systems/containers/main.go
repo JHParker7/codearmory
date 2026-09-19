@@ -188,6 +188,11 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mux.HandleFunc("GET /repositories", handleListRepositories)
+	// Project scoping: file a repository, or a whole namespace, into a gatekeeper
+	// project so its members can reach it without owning the namespace. PUT with an
+	// empty project unlinks. Guarded by namespace ownership + project write access.
+	mux.HandleFunc("PUT /repositories/{namespace}/project", handleSetNamespaceProject)
+	mux.HandleFunc("PUT /repositories/{namespace}/{image}/project", handleSetRepoProject)
 	mux.HandleFunc("GET /repositories/{namespace}/{image}/tags", handleListTags)
 	mux.HandleFunc("GET /repositories/{namespace}/{image}/manifests/{reference}", handleGetManifest)
 	mux.HandleFunc("DELETE /repositories/{namespace}/{image}/manifests/{digest}", handleDeleteManifest)

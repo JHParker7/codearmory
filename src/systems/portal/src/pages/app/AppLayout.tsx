@@ -13,9 +13,8 @@ import { useResizablePane } from '../../components/ResizeHandle';
 import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logoutSession, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
-import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
-import { shortId } from '../../utils';
-import { useOrgNames } from '../../hooks/useNames';
+import { setCurrentProject, fetchKnownProjects, fetchAncestorChain } from '../../store/projectSlice';
+import { createProject } from '../../api/bff';
 
 /**
  * Maps each service-gated /app route segment to its backing platform service, so an
@@ -28,11 +27,14 @@ const ROUTE_SERVICE: Record<string, string> = {
   forge: 'forge',
   workflows: 'workflows',
   tickets: 'tickets',
+  wiki: 'wiki',
   events: 'events',
   containers: 'containers',
   git: 'git_connector',
   codearmory_git_factory: 'codearmory_git_factory',
   outposts: 'outpost-gateway',
+  'blacksmith-roles': 'blacksmith',
+  notifications: 'notifications',
 };
 
 // Services with a first-class bundled page. Any OTHER registered service that
@@ -43,7 +45,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 const BUNDLED_SERVICES = new Set<string>([
   'forge', 'workflows', 'events', 'gatekeeper', 'builder',
   'tickets', 'git_connector', 'containers', 'outpost-gateway',
-  'codearmory_git_factory',
+  'codearmory_git_factory', 'blacksmith', 'wiki',
 ]);
 
 /**
@@ -100,52 +102,51 @@ function isUnavailable(service: string, registered: string[] | null): boolean {
  * kept as a tooltip) so the sidebar can minimise to a slim rail; without an
  * `icon` it falls back to a two-letter token.
  */
-function NavItem({ to, label, badge, service, collapsed, icon, desc }: { to: string; label: string; badge?: string; service?: string; collapsed?: boolean; icon?: IconName; desc?: string }) {
+function NavItem({ to, label, badge, service, collapsed, icon, letter, desc }: { to: string; label: string; badge?: string; service?: string; collapsed?: boolean; icon?: IconName; letter?: string; desc?: string }) {
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   if (service && isUnavailable(service, registeredServices)) return null;
   const token = label.replace(/\/$/, '').slice(0, 2);
-  // Collapsed: label (+ its subtitle) become the hover tooltip since neither is
-  // visible on the slim rail. Expanded: the subtitle renders inline, so no tooltip.
-  const tooltip = collapsed ? (desc ? `${label} — ${desc}` : label) : undefined;
+  // CONSTANT-HEIGHT ROW with a fixed icon column: the icon sits in a 54px cell on the
+  // left, the label follows and is simply clipped by the rail's width when collapsed.
+  // Expanding the rail reveals the label to the right WITHOUT moving the icon — same X,
+  // same Y in both states. The label (+ subtitle) is always the hover tooltip.
+  const tooltip = desc ? `${label} — ${desc}` : label;
   return (
     <NavLink to={to} title={tooltip} style={({ isActive }) => ({
-      display: 'flex', flexDirection: collapsed ? 'row' : 'column',
-      alignItems: collapsed ? 'center' : 'stretch', justifyContent: 'center',
-      padding: collapsed ? '9px 0' : '7px 14px',
+      display: 'flex', alignItems: 'center', height: 40,
       background: isActive ? T.greenSoft : 'transparent',
       borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`,
       color: isActive ? T.textHi : T.text,
       fontFamily: T.mono, fontSize: 13, textDecoration: 'none',
-      transition: 'background .12s',
-      cursor: 'pointer',
+      transition: 'background .12s', cursor: 'pointer',
+      whiteSpace: 'nowrap', overflow: 'hidden',
     })}
     onMouseEnter={(e) => { if (!e.currentTarget.getAttribute('aria-current')) e.currentTarget.style.background = T.greenFaint; }}
     onMouseLeave={(e) => { if (!e.currentTarget.getAttribute('aria-current')) e.currentTarget.style.background = 'transparent'; }}
     >
-      {collapsed ? (
-        <span style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12 }}>
-          {icon ? <Icon name={icon} /> : token}
-          {badge && <span style={{ position: 'absolute', top: -3, right: -6, width: 5, height: 5, borderRadius: '50%', background: T.amber }} />}
-        </span>
-      ) : (
-        <>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>{label}</span>
-            {badge && <span style={{ fontSize: 9, color: T.amber, border: `1px solid ${T.amber}`, padding: '0 4px', letterSpacing: 0.5 }}>{badge}</span>}
-          </div>
-          {desc && <span style={{ fontSize: 10.5, color: T.faint, lineHeight: 1.3, marginTop: 2 }}>{desc}</span>}
-        </>
-      )}
+      <span style={{ width: 54, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
+        {icon ? <Icon name={icon} />
+          // A single character drawn as the glyph. The ~6KB nerd-font subset has no
+          // envelope, so notifications/ uses the Unicode envelope ✉ (U+2709), which
+          // renders from the system font — an email letter, not a bare text letter.
+          : letter ? <span aria-hidden="true" style={{ fontSize: 16, fontWeight: 600, lineHeight: 1, fontFamily: T.mono }}>{letter}</span>
+          : <span style={{ fontSize: 12 }}>{token}</span>}
+        {badge && <span style={{ position: 'absolute', top: 9, right: 13, width: 5, height: 5, borderRadius: '50%', background: T.amber }} />}
+      </span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>{label}</span>
+      {badge && !collapsed && <span style={{ fontSize: 9, color: T.amber, border: `1px solid ${T.amber}`, padding: '0 4px', letterSpacing: 0.5, marginRight: 10, flexShrink: 0 }}>{badge}</span>}
     </NavLink>
   );
 }
 
 /**
- * ProjectSwitcher — the sidebar control for the current project (workspace): a
- * free-text label that filters every list view (pipelines, executions, tickets,
- * repos) and tags newly-created resources. It is purely a view filter, never a
- * permission boundary. Picking "all projects" clears the filter; "+ new project"
- * sets a label that hasn't been used yet.
+ * ProjectSwitcher — the sidebar control for the current project: a first-class
+ * gatekeeper RBAC scope (not a free-text label). Picking one scopes every list
+ * view (pipelines, executions, tickets, repos, wiki, …) to that project's
+ * resources and tags newly-created ones with its slug; "all projects" clears the
+ * scope. "+ new project" CREATES a real project (the caller becomes its admin)
+ * and selects it. The list is the caller's accessible projects, each tagged with
+ * the caller's tier.
  *
  * Collapsed, it shrinks to a single indicator dot that re-expands the sidebar on
  * click (the dropdown needs the room), keeping the slim rail uncluttered.
@@ -157,73 +158,102 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   const dispatch = useAppDispatch();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState('');
+  const [newParent, setNewParent] = useState(''); // parent project SLUG, "" = top-level
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const newRef = useRef<HTMLInputElement>(null);
 
-  const choose = (name: string | null) => {
-    dispatch(setCurrentProject(name));
+  const choose = (slug: string | null) => {
+    dispatch(setCurrentProject(slug));
     setOpen(false);
     setCreating('');
+    setErr('');
   };
 
-  const submitNew = () => {
-    const v = creating.trim();
-    if (v) choose(v);
+  // Create a real gatekeeper project, then select it. The typed text is the display
+  // name; the slug is normalized to the ^[a-z0-9][a-z0-9-]{0,62}$ shape the API wants.
+  const submitNew = async () => {
+    const name = creating.trim();
+    if (!name || busy) return;
+    const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+    if (!slug) { setErr('invalid project name'); return; }
+    setBusy(true); setErr('');
+    try {
+      await createProject(token as string, slug, name, newParent || undefined);
+      await dispatch(fetchKnownProjects(token as string));
+      setNewParent('');
+      choose(slug);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'create failed');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // Collapsed rail: a dot that hints whether a filter is active and expands the
-  // sidebar (where the full switcher lives) when clicked.
-  if (collapsed) {
-    return (
-      <button onClick={onExpand} title={current ? `project: ${current}` : 'all projects'}
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 0', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, cursor: 'pointer', width: '100%' }}>
-        <span style={{ width: 8, height: 8, borderRadius: 2, border: `1px solid ${current ? T.green : T.faint}`, background: current ? T.green : 'transparent' }} />
-      </button>
-    );
-  }
+  // `current` is a slug; show the matching project's display name when we have it.
+  const currentLabel = known.find(p => p.slug === current)?.name || current;
 
+  // CONSTANT-HEIGHT row: the scope indicator (a dot) sits in the fixed icon column so it
+  // never moves; the current project name + chevron reveal to its right when the rail is
+  // expanded (clipped by the rail width when slim). Clicking while collapsed just pins the
+  // rail open — the dropdown needs the width. The dropdown itself is an absolute overlay.
   return (
-    <div style={{ position: 'relative', padding: '10px 14px', borderBottom: `1px solid ${T.border}` }}>
-      <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 5, textTransform: 'uppercase' }}>project</div>
-      <button onClick={() => { const next = !open; setOpen(next); if (next) dispatch(fetchKnownProjects(token)); }}
-        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: T.card, border: `1px solid ${open ? T.green : T.border}`, color: current ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, padding: '6px 9px', cursor: 'pointer', transition: 'border-color .12s' }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {current ? <><span style={{ color: T.green }}>◆ </span>{current}</> : 'all projects'}
+    <div style={{ position: 'relative', borderBottom: `1px solid ${T.border}` }}>
+      <button onClick={() => { if (collapsed) { onExpand(); return; } const next = !open; setOpen(next); if (next) dispatch(fetchKnownProjects(token)); }}
+        title={current ? `project: ${currentLabel}` : 'all projects'}
+        style={{ width: '100%', height: 44, display: 'flex', alignItems: 'center', background: 'transparent', border: 'none', color: current ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, cursor: 'pointer', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+        <span style={{ width: 54, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <span style={{ width: 9, height: 9, borderRadius: 2, border: `1px solid ${current ? T.green : T.faint}`, background: current ? T.green : 'transparent' }} />
         </span>
-        <span style={{ color: T.faint, fontSize: 10, flexShrink: 0 }}>{open ? '▴' : '▾'}</span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', textAlign: 'left' }}>{current ? currentLabel : 'all projects'}</span>
+        <span style={{ color: T.faint, fontSize: 10, flexShrink: 0, marginRight: 12 }}>{open ? '▴' : '▾'}</span>
       </button>
 
-      {open && (
+      {open && !collapsed && (
         <>
           {/* Click-away backdrop so the dropdown closes on any outside click. */}
-          <div onClick={() => { setOpen(false); setCreating(''); }} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-          <div style={{ position: 'absolute', top: '100%', left: 14, right: 14, marginTop: 4, zIndex: 41, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', maxHeight: 320, overflowY: 'auto' }}>
+          <div onClick={() => { setOpen(false); setCreating(''); setErr(''); }} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+          <div style={{ position: 'absolute', top: '100%', left: 8, right: 8, marginTop: 2, zIndex: 41, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', maxHeight: 320, overflowY: 'auto' }}>
             <button onClick={() => choose(null)}
               style={{ width: '100%', textAlign: 'left', background: !current ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${!current ? T.green : 'transparent'}`, color: !current ? T.green : T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer' }}>
               all projects
             </button>
             {known.length > 0 && <div style={{ height: 1, background: T.border }} />}
             {known.map(p => {
-              const active = p === current;
+              const active = p.slug === current;
               return (
-                <button key={p} onClick={() => choose(p)}
-                  style={{ width: '100%', textAlign: 'left', background: active ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${active ? T.green : 'transparent'}`, color: active ? T.textHi : T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                <button key={p.slug} onClick={() => choose(p.slug)}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, textAlign: 'left', background: active ? T.greenSoft : 'transparent', border: 'none', borderLeft: `2px solid ${active ? T.green : 'transparent'}`, color: active ? T.textHi : T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', overflow: 'hidden' }}
                   onMouseEnter={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = T.greenFaint; }}
                   onMouseLeave={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}>
-                  {active && <span style={{ color: T.green }}>◆ </span>}{p}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {active && <span style={{ color: T.green }}>◆ </span>}{p.name || p.slug}
+                  </span>
+                  {p.tier && <span style={{ color: T.faint, fontSize: 9, letterSpacing: 0.5, textTransform: 'uppercase', flexShrink: 0 }}>{p.tier}</span>}
                 </button>
               );
             })}
             <div style={{ height: 1, background: T.border }} />
+            {known.length > 0 && (
+              <div style={{ padding: '8px 10px 0' }}>
+                <select value={newParent} onChange={e => setNewParent(e.target.value)} disabled={busy}
+                  style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px', outline: 'none', cursor: 'pointer' }}>
+                  <option value="">parent: (none — top level)</option>
+                  {known.map(p => <option key={p.project_id} value={p.slug}>parent: {p.name || p.slug}</option>)}
+                </select>
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 6, padding: '8px 10px' }}>
               <input ref={newRef} value={creating} onChange={e => setCreating(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submitNew(); if (e.key === 'Escape') { setOpen(false); setCreating(''); } }}
-                placeholder="+ new project"
+                onKeyDown={e => { if (e.key === 'Enter') submitNew(); if (e.key === 'Escape') { setOpen(false); setCreating(''); setErr(''); } }}
+                placeholder="+ new project" disabled={busy}
                 style={{ flex: 1, minWidth: 0, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px', outline: 'none' }} />
-              <button onClick={submitNew} disabled={!creating.trim()}
-                style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '5px 9px', cursor: creating.trim() ? 'pointer' : 'default', opacity: creating.trim() ? 1 : 0.5 }}>
-                use
+              <button onClick={submitNew} disabled={!creating.trim() || busy}
+                style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '5px 9px', cursor: creating.trim() && !busy ? 'pointer' : 'default', opacity: creating.trim() && !busy ? 1 : 0.5 }}>
+                {busy ? '…' : 'create'}
               </button>
             </div>
+            {err && <div style={{ color: T.red, fontSize: 10, padding: '0 10px 8px' }}>{err}</div>}
           </div>
         </>
       )}
@@ -239,33 +269,20 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
  * In the collapsed rail there is no header to click, so items always render (matching
  * today's slim-rail behaviour), and per-section state is left untouched.
  */
-function NavSection({ title, sidebarCollapsed, defaultCollapsed = false, children }: { title: string; sidebarCollapsed: boolean; defaultCollapsed?: boolean; children: ReactNode }) {
-  // v2 namespace: bumped when the default expansion changed (only tools stays open by
-  // default) so the new defaults apply even in browsers that persisted the old ones.
-  // We persist only on an explicit toggle, so an untouched section always follows
-  // defaultCollapsed while a user's own choice still sticks across reloads.
-  const storageKey = `nav.section.v2.${title}`;
-  const [collapsed, setCollapsed] = useState(() => {
-    const stored = localStorage.getItem(storageKey);
-    return stored === null ? defaultCollapsed : stored === '1';
-  });
-  const toggle = () => setCollapsed(c => { const next = !c; localStorage.setItem(storageKey, next ? '1' : '0'); return next; });
-
-  // Slim rail: no header to toggle, so show the items as-is.
-  if (sidebarCollapsed) return <>{children}</>;
-
+function NavSection({ title, sidebarCollapsed, children }: { title: string; sidebarCollapsed: boolean; defaultCollapsed?: boolean; children: ReactNode }) {
+  // A CONSTANT-HEIGHT header row so the items below keep the same Y whether the rail is
+  // slim or expanded: a short divider sits in the fixed icon column, and the section
+  // title reveals to its right when expanded. Items always render (no per-section
+  // collapse) so the item SET never changes on expand — nothing shifts under the cursor.
   return (
     <>
-      <button onClick={toggle} title={collapsed ? `expand ${title}` : `minimise ${title}`}
-        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-          background: 'transparent', border: 'none', color: T.faint, fontFamily: T.mono, fontSize: 10,
-          letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase', cursor: 'pointer', transition: 'color .12s' }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.faint; }}>
-        <span>{title}</span>
-        <span style={{ fontSize: 8, flexShrink: 0, lineHeight: 1 }}>{collapsed ? '▸' : '▾'}</span>
-      </button>
-      {!collapsed && children}
+      <div style={{ height: 26, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+        <span style={{ width: 54, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <span style={{ width: 16, height: 1, background: T.border }} />
+        </span>
+        {!sidebarCollapsed && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{title}</span>}
+      </div>
+      {children}
     </>
   );
 }
@@ -274,7 +291,6 @@ function NavSection({ title, sidebarCollapsed, defaultCollapsed = false, childre
 export function AppLayout() {
   const token = useAppSelector(s => s.auth.token)!;
   const user = useAppSelector(s => s.auth.user);
-  const orgNames = useOrgNames(token);
   const permissions = useAppSelector(s => s.auth.permissions);
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   const serviceUiPaths = useAppSelector(s => s.auth.serviceUiPaths);
@@ -282,11 +298,21 @@ export function AppLayout() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  // The sidebar nav only appears once a project is selected — before that the
+  // portal shows the project picker (front door) with just a slim top bar.
+  const currentProject = useAppSelector(s => s.project.current);
+  const knownProjects = useAppSelector(s => s.project.known);
 
-  // Sidebar minimise — collapses to a slim icon rail to hand the main pane more
-  // width. Persisted so the choice sticks across reloads.
-  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('nav.collapsed') === '1');
-  useEffect(() => { localStorage.setItem('nav.collapsed', navCollapsed ? '1' : '0'); }, [navCollapsed]);
+  // Sidebar behaviour: a slim icon rail by default; it EXPANDS on hover to reveal each
+  // item's label beside its icon, and the pin toggle («/») keeps it open (persisted).
+  // The rail's rows are constant-height with a fixed icon column, so expanding only
+  // reveals labels to the right — icons never move on the Y axis as you reach for one.
+  // Hover-expand OVERLAYS the content (absolute) so the main pane doesn't reflow; only
+  // pinning reserves the width in the flex flow.
+  const [navPinned, setNavPinned] = useState(() => localStorage.getItem('nav.pinned') === '1');
+  useEffect(() => { localStorage.setItem('nav.pinned', navPinned ? '1' : '0'); }, [navPinned]);
+  const [navHover, setNavHover] = useState(false);
+  const navMini = !navPinned && !navHover;
   // When expanded, the sidebar width is user-draggable (persisted). The width
   // transition is suspended mid-drag so it tracks the cursor crisply, then restored
   // so the collapse/expand toggle still animates.
@@ -329,6 +355,15 @@ export function AppLayout() {
     if (user) dispatch(fetchKnownProjects(token));
   }, [user, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Resolve the selected project's ancestor chain so list views can show inherited
+  // (parent) resources. Maps the current slug → project_id via the known list, then
+  // fetches [self, …ancestors]. Re-runs when the selection or the known list changes.
+  useEffect(() => {
+    if (!user || !currentProject) return;
+    const proj = knownProjects.find(p => p.slug === currentProject);
+    if (proj) dispatch(fetchAncestorChain({ token, projectId: proj.project_id }));
+  }, [user, token, currentProject, knownProjects]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleLogout = () => {
     // The thunk, not the bare reducer: it revokes the session and clears the
     // HttpOnly cookie server-side. Clearing local state alone leaves the
@@ -338,95 +373,107 @@ export function AppLayout() {
   };
 
   return (
-    <div ref={shellRef} style={{ display: 'flex', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
-      {/* Sidebar */}
-      <aside style={{ width: navCollapsed ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease' }}>
+    <div ref={shellRef} style={{ display: 'flex', flexDirection: currentProject ? 'row' : 'column', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
+      {!currentProject ? (
+        // No project chosen: hide the nav, show a slim top bar over the picker.
+        <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 18px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Logo size={18} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: T.textHi, letterSpacing: -0.2 }}>codearmory</span>
+            <span style={{ fontSize: 11, color: T.faint, marginLeft: 6 }}>· select a project to begin</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <NavLink to="/app/settings" style={{ color: T.dim, fontFamily: T.mono, fontSize: 12, textDecoration: 'none', border: `1px solid ${T.border}`, padding: '5px 10px' }}>settings/</NavLink>
+            <button onClick={handleLogout} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '5px 10px', cursor: 'pointer' }}>[ ./logout ]</button>
+          </div>
+        </header>
+      ) : (
+      <>
+      {/* Sidebar — a 56px flow spacer reserves the rail's width (or the full width when
+          pinned); the aside itself is absolutely positioned so hover-expand overlays the
+          content instead of reflowing it. */}
+      <div style={{ width: navPinned ? navW : 56, flexShrink: 0, position: 'relative', transition: navResizing ? 'none' : 'width .14s ease' }}>
+      <aside onMouseEnter={() => setNavHover(true)} onMouseLeave={() => setNavHover(false)}
+        style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: navMini ? 56 : navW, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease', zIndex: 30, overflow: 'hidden', boxShadow: navHover && !navPinned ? '4px 0 16px rgba(0,0,0,0.35)' : undefined }}>
         {/* Logo + minimise toggle */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: navCollapsed ? 'center' : 'space-between', gap: 10, padding: navCollapsed ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
-          {!navCollapsed && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: navMini ? 'center' : 'space-between', gap: 10, padding: navMini ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
+          {!navMini && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
               <Logo size={18} />
               <span style={{ fontSize: 13, fontWeight: 700, color: T.textHi, letterSpacing: -0.2 }}>codearmory</span>
             </div>
           )}
-          <button onClick={() => setNavCollapsed(c => !c)} title={navCollapsed ? 'expand sidebar' : 'minimise sidebar'}
+          <button onClick={() => setNavPinned(p => !p)} title={navPinned ? 'auto-hide sidebar' : 'pin sidebar open'}
             style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: '4px 7px', cursor: 'pointer', transition: 'border-color .12s, color .12s' }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.green; (e.currentTarget as HTMLButtonElement).style.color = T.green; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-            {navCollapsed ? '»' : '«'}
+            {navPinned ? '«' : '»'}
           </button>
         </div>
 
-        {/* User */}
-        {user && !navCollapsed && (
-          <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}` }}>
-            <div style={{ fontSize: 11, color: T.faint, letterSpacing: 0.5, marginBottom: 4 }}>SIGNED IN AS</div>
-            <div style={{ fontSize: 13, color: T.textHi, fontWeight: 600 }}>@{user.username}</div>
-            <div style={{ fontSize: 11, color: T.dim, marginTop: 2 }}>{user.email}</div>
-            {user.org_id && <div style={{ fontSize: 10.5, color: T.faint, marginTop: 4 }}>org: {orgNames[user.org_id] ?? shortId(user.org_id)}</div>}
-          </div>
-        )}
-
         {/* Project switcher — current-project view filter (or a slim indicator when collapsed). */}
-        <ProjectSwitcher collapsed={navCollapsed} onExpand={() => setNavCollapsed(false)} />
+        <ProjectSwitcher collapsed={navMini} onExpand={() => setNavPinned(true)} />
 
         {/* Nav — each section header doubles as a per-section minimise toggle when the
             sidebar is expanded; the slim rail shows every section's items as-is. */}
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto', overflowX: 'hidden' }}>
-          <NavSection title="tools" sidebarCollapsed={navCollapsed}>
-            <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
-            <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
+          <NavSection title="tools" sidebarCollapsed={navMini}>
+            <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navMini} icon="workflows" />
+            <NavItem to="/app/blacksmith-roles" label="agents/" desc="Configure the coding agents" service="blacksmith" collapsed={navMini} icon="builder" />
+            <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navMini} icon="tickets" />
+            <NavItem to="/app/wiki" label="wiki/" desc="Project source of truth (git-backed)" service="wiki" collapsed={navMini} icon="blueprints" />
             {/* The git host, under the name people came for. Its route stays the
                 registry name so existing links keep working. */}
-            <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navCollapsed} icon="git" />
+            <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navMini} icon="git" />
             {/* Pinned iframe services sit alongside the bundled tools rather than in
                 the discovered-modules list — they are day-to-day surfaces. */}
             {Object.entries(PINNED_SERVICES).map(([svc, { label, desc }]) => (
-              <NavItem key={svc} to={`/app/${svc}`} label={label} desc={desc} service={svc} collapsed={navCollapsed} icon="git" />
+              <NavItem key={svc} to={`/app/${svc}`} label={label} desc={desc} service={svc} collapsed={navMini} icon="git" />
             ))}
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="modules" sidebarCollapsed={navCollapsed} defaultCollapsed>
+          <NavSection title="modules" sidebarCollapsed={navMini} defaultCollapsed>
             {/* Labelled for what it is — a credential broker for repos hosted
                 elsewhere — so it is not mistaken for repos/, which hosts them here. */}
-            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
-            <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
-            <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navCollapsed} icon="events" />
-            <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
-            <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
+            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navMini} icon="argo" />
+            <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navMini} icon="forge" />
+            <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navMini} icon="events" />
+            <NavItem to="/app/notifications" label="notifications/" desc="Send events to Slack, Discord, email" service="notifications" collapsed={navMini} letter="✉" />
+            <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navMini} icon="containers" />
+            <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navMini} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
                 non-core service that advertises a ui_path) — discovered at runtime,
                 no per-service code. Subtitles come from SERVICE_DESC when known. */}
             {iframeServices.map(svc => (
-              <NavItem key={svc} to={`/app/${svc}`} label={`${svc}/`} desc={SERVICE_DESC[svc]} service={svc} collapsed={navCollapsed} />
+              <NavItem key={svc} to={`/app/${svc}`} label={`${svc}/`} desc={SERVICE_DESC[svc]} service={svc} collapsed={navMini} />
             ))}
           </NavSection>
-          <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="admin" sidebarCollapsed={navCollapsed} defaultCollapsed>
-            {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" desc="Deploy & configure services" collapsed={navCollapsed} icon="builder" />}
-            {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" desc="Who changed what, and when" collapsed={navCollapsed} icon="audit" />}
-            <NavItem to="/app/projects" label="projects/" desc="Group resources & grant access" collapsed={navCollapsed} icon="projects" />
-            <NavItem to="/app/gatekeeper" label="gatekeeper/" desc="Access control — users & roles" collapsed={navCollapsed} icon="gatekeeper" />
-          </NavSection>
-          <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="account" sidebarCollapsed={navCollapsed} defaultCollapsed>
-            <NavItem to="/app/settings" label="settings/" desc="Theme, account & preferences" collapsed={navCollapsed} icon="settings" />
-          </NavSection>
+          {/* admin & account (gatekeeper, users/roles, projects, builder, audit,
+              preferences) are NOT project resources — they live on the Settings
+              page reached from the footer link below, keeping the nav to a
+              project's own resources. */}
         </nav>
 
+        {/* Settings link — the home for the non-project admin/account pages — sits
+            just above logout. */}
+        <NavItem to="/app/settings" label="settings/" desc="Users, roles, projects, admin & preferences" collapsed={navMini} icon="settings" />
+
         {/* Logout */}
-        <div style={{ padding: navCollapsed ? '10px 8px' : '10px 14px', borderTop: `1px solid ${T.border}` }}>
-          <button onClick={handleLogout} title={navCollapsed ? 'logout' : undefined}
-            style={{ width: '100%', background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', textAlign: navCollapsed ? 'center' : 'left', letterSpacing: 0.3, transition: 'border-color .12s, color .12s' }}
+        <div style={{ padding: navMini ? '10px 8px' : '10px 14px', borderTop: `1px solid ${T.border}` }}>
+          <button onClick={handleLogout} title={navMini ? 'logout' : undefined}
+            style={{ width: '100%', background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', cursor: 'pointer', textAlign: navMini ? 'center' : 'left', letterSpacing: 0.3, transition: 'border-color .12s, color .12s' }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-            {navCollapsed ? '⏻' : '[ ./logout ]'}
+            {navMini ? '⏻' : '[ ./logout ]'}
           </button>
         </div>
       </aside>
+      </div>
 
       {/* Drag to resize the sidebar (only while expanded). */}
-      {!navCollapsed && navHandle}
+      {navPinned && navHandle}
+      </>
+      )}
 
       {/* Main content */}
       <main style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>

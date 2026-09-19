@@ -18,9 +18,9 @@ import (
 // normalize into this shape; this handler verifies the provider HMAC over the raw body, then
 // turns the payload into a repo.push envelope and dispatches it.
 type gitWebhook struct {
-	Repo    string `json:"repo"`    // becomes the event subject (namespace/name)
-	Event   string `json:"event"`   // push, tag, …
-	Ref     string `json:"ref"`     // short branch/tag
+	Repo    string `json:"repo"`  // becomes the event subject (namespace/name)
+	Event   string `json:"event"` // push, tag, …
+	Ref     string `json:"ref"`   // short branch/tag
 	Commit  string `json:"commit"`
 	Pusher  string `json:"pusher"`
 	Message string `json:"message"`

@@ -26,7 +26,7 @@ func handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out, err := listArtifacts(ctx, userID)
+	out, err := listArtifacts(ctx, userID, r.URL.Query().Get("project"), accessibleProjectIDs(ctx, r.Header.Get("Authorization")))
 	if err != nil {
 		slog.ErrorContext(ctx, "list artifacts", "user_id", userID, "error", err)
 		http.Error(w, "failed to list artifacts", http.StatusInternalServerError)
@@ -43,7 +43,9 @@ func handleGetArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a, err := getArtifact(ctx, userID, name)
+	// Owner OR a member of the project (?project=) the artifact is filed into. A
+	// non-owner without a project grant is indistinguishable from a missing row (404).
+	a, err := loadAuthorizedArtifact(ctx, r.Header.Get("Authorization"), userID, name, "getArtifact", r.URL.Query().Get("project"))
 	if errors.Is(err, errNoSuch) {
 		http.Error(w, "artifact not found", http.StatusNotFound)
 		return
@@ -63,7 +65,10 @@ func handleDownloadArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a, err := getArtifact(ctx, userID, name)
+	// Owner OR a project member (?project=). The blob store is keyed by the OWNER's id,
+	// so read it under a.UserID — which is the caller for their own, and the filing
+	// owner for a project artifact reached as a member.
+	a, err := loadAuthorizedArtifact(ctx, r.Header.Get("Authorization"), userID, name, "getArtifact", r.URL.Query().Get("project"))
 	if errors.Is(err, errNoSuch) {
 		http.Error(w, "artifact not found", http.StatusNotFound)
 		return
@@ -72,7 +77,7 @@ func handleDownloadArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get artifact", http.StatusInternalServerError)
 		return
 	}
-	f, err := store.Open(ctx, userID, name)
+	f, err := store.Open(ctx, a.UserID, a.Name)
 	if err != nil {
 		// The row exists but the blob does not — the store and the DB have diverged.
 		// Report it rather than serving an empty body that looks like a valid cache.
@@ -104,6 +109,27 @@ func handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	if msg := validateName(name); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
+	}
+
+	// Project scoping. The project slug rides on a query param (?project=) rather than
+	// the request body, because on this route the body IS the blob. If it names a real
+	// gatekeeper project the caller can reach, file the artifact into it — but only if
+	// the caller may create within it. A slug that resolves to nothing stays a free-text
+	// label (unchanged behaviour); a slug the caller may only view is refused rather than
+	// silently downgraded to a label. Resolved BEFORE the blob is streamed so a refused
+	// upload spends no bandwidth. Mirrors forge's submit handler.
+	projectSlug := r.URL.Query().Get("project")
+	var projectID, projectNamespace string
+	if projectSlug != "" {
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, projectSlug); p != nil {
+			if !checkProjectPermission(ctx, bearer, "createArtifact", "artifacts", p.Slug, "") {
+				http.Error(w, "you cannot create artifacts in project "+p.Slug, http.StatusForbidden)
+				return
+			}
+			projectID = p.ProjectID
+			projectNamespace = p.Namespace
+		}
 	}
 
 	maxBytes, _, _, err := effectiveQuota(ctx, userID)
@@ -156,6 +182,7 @@ func handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	a := Artifact{
 		ArtifactID: uuid.New().String(), UserID: userID, OrgID: orgID,
 		Name: name, SizeBytes: size, ContentType: ct, SHA256: digest,
+		Project: projectSlug, ProjectID: projectID, ProjectNamespace: projectNamespace,
 	}
 	if err := upsertArtifact(ctx, a); err != nil {
 		// The blob landed but the row did not. What to do about it depends on whether
@@ -201,7 +228,19 @@ func handleDeleteArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	n, err := deleteArtifact(ctx, userID, name)
+	// Owner OR a project member (?project=) with the delete grant. The row and blob are
+	// keyed by the OWNER's id, so operate on a.UserID — the caller for their own, the
+	// filing owner for a project artifact.
+	a, err := loadAuthorizedArtifact(ctx, r.Header.Get("Authorization"), userID, name, "deleteArtifact", r.URL.Query().Get("project"))
+	if errors.Is(err, errNoSuch) {
+		http.Error(w, "artifact not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed to delete artifact", http.StatusInternalServerError)
+		return
+	}
+	n, err := deleteArtifact(ctx, a.UserID, a.Name)
 	if err != nil {
 		http.Error(w, "failed to delete artifact", http.StatusInternalServerError)
 		return
@@ -212,8 +251,8 @@ func handleDeleteArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	// Drop the row first: an orphaned blob wastes disk, but an orphaned ROW would
 	// keep charging the user's quota for bytes they can no longer reach.
-	if err := store.Remove(ctx, userID, name); err != nil {
-		slog.WarnContext(ctx, "artifact blob remove failed", "user_id", userID, "name", name, "error", err)
+	if err := store.Remove(ctx, a.UserID, a.Name); err != nil {
+		slog.WarnContext(ctx, "artifact blob remove failed", "user_id", a.UserID, "name", a.Name, "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

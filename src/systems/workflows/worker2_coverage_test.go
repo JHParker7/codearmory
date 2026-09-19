@@ -16,8 +16,8 @@ func TestFailRun(t *testing.T) {
 	stubGatekeeperRouting(t, "u", "o") // revokeRunToken target
 	run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: "w1", TriggeredBy: "u", OrgID: "o", Status: "running", CreatedAt: time.Now().UTC()}
 	run.Add(context.Background())                                                                 //nolint:errcheck
-	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)          //nolint:errcheck
-	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) })  //nolint:errcheck
+	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)         //nolint:errcheck
+	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
 
 	newWorkerPool().failRun(run.RunID, "sess")
 	got, _ := (WorkflowRun{RunID: run.RunID}).Get(context.Background())
@@ -68,8 +68,8 @@ func TestHandleCancelRun_Success(t *testing.T) {
 	okGate(t, "cu", "co")
 	run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: "w1", TriggeredBy: "cu", OrgID: "co", Status: "running", CreatedAt: time.Now().UTC()}
 	run.Add(context.Background())                                                                 //nolint:errcheck
-	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)          //nolint:errcheck
-	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) })  //nolint:errcheck
+	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)         //nolint:errcheck
+	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
 
 	r := authReq(http.MethodDelete, "/runs/"+run.RunID, nil)
 	r.SetPathValue("id", run.RunID)

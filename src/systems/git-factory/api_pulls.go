@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -34,38 +35,17 @@ type PullRequest struct {
 	Body      string `json:"body"`
 	SourceRef string `json:"source_ref"` // the branch being merged
 	TargetRef string `json:"target_ref"` // the branch merged into
-	// SourceRepoID is the repo SourceRef lives in, for a PR opened from a fork. Empty
-	// means the same repo — the ordinary case, and what every pre-fork row reads as, so
-	// existing PRs keep working untouched. sourceRepo() resolves the two into one.
-	SourceRepoID string    `gorm:"default:''" json:"source_repo_id,omitempty"`
-	State        string    `json:"state"`  // open | merged | closed
-	Author       string    `json:"author"` // gatekeeper user_id
-	MergeCommit  string    `json:"merge_commit,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-}
-
-// sourceRepo is the repo the PR's source branch lives in — itself for a same-repo PR.
-func (p PullRequest) sourceRepo() string {
-	if p.SourceRepoID == "" {
-		return p.RepoID
-	}
-	return p.SourceRepoID
-}
-
-// crossRepo reports whether this PR comes from a fork.
-func (p PullRequest) crossRepo() bool {
-	return p.SourceRepoID != "" && p.SourceRepoID != p.RepoID
-}
-
-// localSourceRef is the ref to diff and merge FROM inside the target repo. For a fork
-// PR that is the scratch ref the source commits were fetched into; the branch name
-// itself means nothing in the target's object database.
-func (p PullRequest) localSourceRef() string {
-	if p.crossRepo() {
-		return crossRepoRef(p.ID)
-	}
-	return p.SourceRef
+	State     string `json:"state"`      // open | merged | closed
+	Author    string `json:"author"`     // gatekeeper user_id (the DISPLAYED opener)
+	// OpenedByUserID is the identity that actually called createPull. It differs from
+	// Author only when an authorised automation caller attributed the PR to a bot
+	// display identity via the createPull `author` override: Author is the bot shown
+	// in the UI, OpenedByUserID is the real caller, kept for accountability. Empty
+	// when no override was used (then the opener IS Author) and on pre-existing rows.
+	OpenedByUserID string    `json:"opened_by,omitempty"`
+	MergeCommit    string    `json:"merge_commit,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 const (
@@ -83,6 +63,22 @@ func nextPRNumber(ctx context.Context, repoID string) int {
 	return max.N + 1
 }
 
+// automationAuthors returns the set of user ids that a createPull caller may name in
+// the `author` override, read from GIT_FACTORY_AUTOMATION_USERS (comma-separated). A
+// workflow opening a PR with its own per-run repo token can thereby show a stable bot
+// as the opener while the real caller stays authorised and recorded (OpenedByUserID).
+// Restricting to this allowlist keeps the override pointing only at sanctioned bot
+// accounts. Empty/unset turns the feature off.
+func automationAuthors() map[string]bool {
+	out := map[string]bool{}
+	for _, id := range strings.Split(os.Getenv("GIT_FACTORY_AUTOMATION_USERS"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleCreatePull")
 	defer span.End()
@@ -96,9 +92,11 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		Body      string `json:"body"`
 		SourceRef string `json:"source_ref"`
 		TargetRef string `json:"target_ref"`
-		// SourceRepoID opens the PR from a FORK: the source branch lives in that repo
-		// rather than this one. Empty is the ordinary same-repo case.
-		SourceRepoID string `json:"source_repo_id"`
+		// Author, when set, attributes the PR to an allowlisted automation identity
+		// (see automationAuthors). It lets a workflow that opens a PR with its own
+		// per-run repo credential still show a stable bot as the opener, without that
+		// bot holding any credential or grant. Ignored for a self-attribution.
+		Author string `json:"author"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -130,10 +128,22 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional author override: the caller has already passed the createPull check
+	// above, so this only decides ATTRIBUTION, never access. It is guarded to the
+	// automation allowlist so it can name a sanctioned bot but never impersonate a
+	// human, and the true caller is retained in OpenedByUserID for accountability.
+	author, openedBy := userID, ""
+	if req.Author != "" && req.Author != userID {
+		if !automationAuthors()[req.Author] {
+			http.Error(w, "author override must name an allowlisted automation account", http.StatusForbidden)
+			return
+		}
+		author, openedBy = req.Author, userID
+	}
 	pr := PullRequest{
 		ID: uuid.New().String(), RepoID: re.ID, Number: nextPRNumber(ctx, re.ID),
 		Title: req.Title, Body: req.Body, SourceRef: req.SourceRef, TargetRef: req.TargetRef,
-		State: prOpen, Author: userID,
+		State: prOpen, Author: author, OpenedByUserID: openedBy,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 
@@ -174,8 +184,11 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	slog.InfoContext(ctx, "pull request opened", "Repo_id", re.ID, "number", pr.Number, "author", userID)
-	notifyPullEvent(ctx, re, eventPullOpened, pr, userID)
+	slog.InfoContext(ctx, "pull request opened", "Repo_id", re.ID, "number", pr.Number, "author", pr.Author, "opened_by", userID)
+	// Announce the open so a trigger can run CI or a review on it. Detached (a slow
+	// events service must not hold the request), tenant = repo owner (notifyPullRequest).
+	head, _ := branchTip(ctx, re.ID, pr.SourceRef)
+	notifyPullRequest(ctx, re, "opened", pr, head, "")
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusCreated, pr)
 }
@@ -222,32 +235,50 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := map[string]any{"pull_request": pr}
+	// The commit count, changed files, and diff of the PR. For an OPEN (or closed-
+	// unmerged) PR the live target..source range is right. Once MERGED, source is an
+	// ancestor of target so that range is empty — a merged PR would then report zero
+	// commits and no diff, and the portal would render it as if it carried nothing.
+	// Anchor on the merge commit's two parents instead (merge^1 = target before the
+	// merge, merge^2 = source tip at merge), which git preserves forever even if the
+	// source branch is later moved or deleted.
+	diffBase, diffHead := pr.TargetRef, pr.SourceRef
+	if pr.State == prMerged && pr.MergeCommit != "" {
+		diffBase, diffHead = pr.MergeCommit+"^1", pr.MergeCommit+"^2"
+	}
+	// Report a failure rather than omitting the key: a caller cannot distinguish
+	// "no files changed" from "we could not work it out" if the field is missing.
+	if changes, err := diffStat(ctx, re.ID, diffBase, diffHead); err == nil {
+		out["files"] = changes
+	} else {
+		out["files_error"] = err.Error()
+	}
+	if patch, err := diffPatch(ctx, re.ID, diffBase, diffHead); err == nil {
+		out["diff"] = patch // the full review diff
+	}
+	out["commits"] = commitsBetween(ctx, re.ID, diffBase, diffHead)
+	// The review verdict and whether this PR's target gates merge on it, so a caller
+	// knows both where the review stands and whether it is binding. Historical for a
+	// merged/closed PR, but still worth showing.
+	reviews := loadReviews(ctx, re.ID, pr.ID)
+	out["reviews"] = map[string]any{
+		"decision": decideReviews(reviews, pr.Author),
+		"required": reviewRequiredFor(ctx, re.ID, pr.TargetRef),
+		"reviews":  reviews,
+	}
 	if pr.State == prOpen {
-		// A fork PR's source lives in another repo, which has kept moving since the PR
-		// was opened. Refresh the scratch ref first so the diff and the mergeability
-		// verdict describe the branch as it is NOW, matching the same-repo behaviour.
-		if pr.crossRepo() {
-			if err := fetchCrossRepo(ctx, re.ID, pr.sourceRepo(), pr.SourceRef, pr.ID); err != nil {
-				slog.WarnContext(ctx, "pull: could not refresh fork ref", "Repo_id", re.ID, "number", pr.Number, "error", err)
-			}
-		}
-		src := pr.localSourceRef()
-		// Report a failure rather than omitting the key: a caller cannot distinguish
-		// "no files changed" from "we could not work it out" if the field is missing.
-		if changes, err := diffStat(ctx, re.ID, pr.TargetRef, src); err == nil {
-			out["files"] = changes
-		} else {
-			out["files_error"] = err.Error()
-		}
-		if patch, err := diffPatch(ctx, re.ID, pr.TargetRef, src); err == nil {
-			out["diff"] = patch // the full review diff (target...source)
-		}
-		out["commits"] = commitsBetween(ctx, re.ID, pr.TargetRef, src)
-		res, err := tryMerge(ctx, re.ID, pr.TargetRef, src)
+		res, err := tryMerge(ctx, re.ID, pr.TargetRef, pr.SourceRef)
 		if err != nil {
 			res = mergeResult{Mergeable: false, Reason: err.Error()}
 		}
 		out["merge"] = res
+		// The checks a workflow (or any CI) reported on this PR's head commit, so a
+		// reviewer sees green/red without leaving the PR. Combined worst-first; "" means
+		// nothing has reported yet.
+		if sha, ok := branchTip(ctx, re.ID, pr.SourceRef); ok {
+			statuses := loadStatuses(ctx, re.ID, sha)
+			out["status"] = map[string]any{"sha": sha, "state": combinedState(statuses), "statuses": statuses}
+		}
 	}
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, out)
@@ -273,14 +304,19 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pull request is "+pr.State, http.StatusConflict)
 		return
 	}
-	// Branch protection. Enforced HERE and not only in the pre-receive hook: the hook
-	// sees pushes, and a merge through this handler never reaches it, so without this
-	// the API merge path walked straight past every rule on the target branch.
-	if err := mergeGate(ctx, re, pr); err != nil {
-		slog.InfoContext(ctx, "merge blocked by branch protection",
-			"Repo_id", re.ID, "number", pr.Number, "target", pr.TargetRef, "reason", err.Error())
-		http.Error(w, "merge blocked: "+err.Error(), http.StatusConflict)
-		return
+	// A protected target branch gates the merge on review: an approval from someone
+	// other than the author, and nobody currently requesting changes. Off unless the
+	// branch's protection turns it on, so unprotected repos merge exactly as before.
+	if reviewRequiredFor(ctx, re.ID, pr.TargetRef) {
+		d := decideReviews(loadReviews(ctx, re.ID, pr.ID), pr.Author)
+		if d.ChangesRequested {
+			http.Error(w, "changes have been requested; resolve the review before merging", http.StatusConflict)
+			return
+		}
+		if d.Approvals < 1 {
+			http.Error(w, "the target branch requires an approving review before merge", http.StatusConflict)
+			return
+		}
 	}
 
 	var req struct {
@@ -324,7 +360,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = touchRepo(ctx, re.ID)
 	notifyPush(ctx, re, userID, []string{pr.TargetRef}, before)
-	notifyPullEvent(ctx, re, eventPullMerged, pr, userID)
+	notifyPullRequest(ctx, re, "merged", pr, sha, userID)
 	slog.InfoContext(ctx, "pull request merged", "Repo_id", re.ID, "number", pr.Number, "commit", sha)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, pr)
@@ -354,7 +390,7 @@ func handleClosePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pr.State = prClosed
-	notifyPullEvent(ctx, re, eventPullClosed, pr, userID)
+	notifyPullRequest(ctx, re, "closed", pr, "", "")
 	writeJSON(w, http.StatusOK, pr)
 }
 

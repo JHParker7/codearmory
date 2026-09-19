@@ -1011,6 +1011,10 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		(WorkflowStepRun{StepRunID: stepRunID}).SetStatus(ctx, want)
 	}
 
+	// Tracks the last stdout streamed onto the step run, so a live update is written
+	// only when the action's output actually grows (not every poll interval).
+	var lastLogs string
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -1050,6 +1054,19 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		}
 		status, _ := result[def.Async.StatusField].(string)
 		reflectQueueState(status)
+
+		// STREAM THE ACTION'S STDOUT LIVE. asyncLogs is otherwise read only at a terminal
+		// state (below), so an agent step showed nothing for the minutes it ran — the run
+		// view sat on "running" with an empty log. Push the current stdout onto the step
+		// run whenever it grows, so the run view streams the agent's reasoning and tool
+		// calls as they happen. Only on change (a 2s poll must not be a 2s write), and
+		// only when this step owns a step run.
+		if stepRunID != "" {
+			if live := asyncLogs(def.Async, result); live != "" && live != lastLogs {
+				lastLogs = live
+				(WorkflowStepRun{StepRunID: stepRunID}).SetLogs(ctx, live)
+			}
+		}
 
 		// memory_used_mb / memory_limit_mb are present on a forge execution's poll
 		// response and absent elsewhere; jsonInt64Ptr yields nil when missing, so

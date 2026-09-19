@@ -95,6 +95,12 @@ type workflowGraph struct {
 	// See mapregion.go.
 	regions  map[string]*mapRegion
 	regionOf map[string]string
+	// loops are the loop super-nodes over this node set, by id; loopOf maps a node to
+	// its loop ("" when in none). A loop schedules as ONE super-node exactly like a
+	// map region, but its subgraph is repeated SEQUENTIALLY in place until an exit
+	// condition holds or its limit is reached. See loopregion.go.
+	loops  map[string]*loopRegion
+	loopOf map[string]string
 	// outerIndex overrides the step index REPORTED for a node, when this graph is a
 	// map region's subgraph. `index` is the position within THIS graph's step slice
 	// (used to fetch a node), but WorkflowStepRun.StepIndex must stay the position in
@@ -121,6 +127,13 @@ func (g *workflowGraph) stepIndex(n string) int {
 func (g *workflowGraph) withMaps(defs []MapDef) *workflowGraph {
 	g.regions = regionsOf(g.steps, defs)
 	g.regionOf = regionOfNode(g.regions)
+	return g
+}
+
+// withLoops attaches the workflow's loops, the sequential-repeat twin of withMaps.
+func (g *workflowGraph) withLoops(defs []LoopDef) *workflowGraph {
+	g.loops = loopsOf(g.steps, defs)
+	g.loopOf = loopOfNode(g.loops)
 	return g
 }
 
@@ -314,7 +327,7 @@ func (wf Workflow) buildGraph() *workflowGraph {
 	if len(routes) == 0 {
 		routes = deriveRoutes(wf.Steps)
 	}
-	return newGraph(wf.Steps, routes).withMaps(wf.Maps)
+	return newGraph(wf.Steps, routes).withMaps(wf.Maps).withLoops(wf.Loops)
 }
 
 // validateGraph checks a node set and its routes, returning a user-facing message
@@ -323,8 +336,11 @@ func (wf Workflow) buildGraph() *workflowGraph {
 //
 // It assumes step names are already known unique (validateUniqueStepNames runs
 // first on the create/update path), since names are the node identity here.
-func validateGraph(steps []WorkflowStep, routes []WorkflowRoute, maps []MapDef) string {
+func validateGraph(steps []WorkflowStep, routes []WorkflowRoute, maps []MapDef, loops []LoopDef) string {
 	if msg := validateMaps(steps, maps, routes); msg != "" {
+		return msg
+	}
+	if msg := validateLoops(steps, loops, routes); msg != "" {
 		return msg
 	}
 	if len(routes) == 0 {

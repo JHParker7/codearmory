@@ -84,6 +84,20 @@ spec:
         - protocol: TCP
           port: {{ .Values.registryMirror.port }}
     {{- end }}
+    # The in-cluster git-factory — same narrow hole (a run pushes its work and opens a
+    # dev PR here; in forge's NO_PROXY, per-user authenticated by the git: run-token).
+    {{- if and .Values.gitFactory.enabled .Values.forge.kata.egress.allowGitFactory }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: git-factory
+      ports:
+        - protocol: TCP
+          port: {{ .Values.gitFactory.port }}
+    {{- end }}
     # Explicit egress to specific private ENDPOINTS a build legitimately needs — chiefly
     # an image registry on the private network (e.g. a self-hosted Forgejo the CI pushes
     # built images to). Each entry is "<ip>[/cidr]:<port>", allowed back in despite the

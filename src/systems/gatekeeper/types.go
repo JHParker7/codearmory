@@ -180,11 +180,16 @@ type Permissions struct {
 // an associated role. Permissions are added to the role via ServicePermissionRequest.
 //
 // Key fields:
-//   - HashedKey: bcrypt hash of the current key. Updated on each rotation.
-//   - HashedBootstrapKey: bcrypt hash of the bootstrap key from GATEKEEPER_SERVICES.
-//     Never changes after the account is seeded. Used as a fallback in
-//     requireServiceAuth so that a service pod can re-authenticate after a restart
-//     even if its rotated key was only stored in memory.
+//   - HashedKey: hash of the current key. Updated on each rotation.
+//   - HashedBootstrapKey: hash of the bootstrap key from GATEKEEPER_SERVICES.
+//
+// Both are written by hashServiceKey (see service_key.go) and may still hold a
+// legacy bcrypt hash from before that change; verifyServiceKey accepts either
+// and upgrades the row on the way past.
+//
+//	Never changes after the account is seeded. Used as a fallback in
+//	requireServiceAuth so that a service pod can re-authenticate after a restart
+//	even if its rotated key was only stored in memory.
 //
 // Network binding fields (both optional; nil / empty slice means "no restriction"):
 //
@@ -412,8 +417,8 @@ func (PersonalToken) TableName() string { return "personal_tokens" }
 // service. Three built-in roles (viewer/developer/admin) hold exactly those wildcards;
 // membership is the ordinary RoleMembership on whichever tier role.
 type Project struct {
-	ProjectID       string    `json:"project_id"        gorm:"column:project_id;primaryKey"`
-	Slug            string    `json:"slug"              gorm:"column:slug;uniqueIndex"`
+	ProjectID string `json:"project_id"        gorm:"column:project_id;primaryKey"`
+	Slug      string `json:"slug"              gorm:"column:slug;uniqueIndex"`
 	// Namespace is "" for an unbound project (its own top-level namespace, addressed as
 	// project/<slug>) or "org/<name>" when an org administers it. It is NEVER a username
 	// — a project is not bound to a user; the creator is simply its first admin member.
@@ -423,6 +428,11 @@ type Project struct {
 	ViewerRoleID    string    `json:"viewer_role_id"    gorm:"column:viewer_role_id;default:''"`
 	DeveloperRoleID string    `json:"developer_role_id" gorm:"column:developer_role_id;default:''"`
 	AdminRoleID     string    `json:"admin_role_id"     gorm:"column:admin_role_id;default:''"`
+	// ParentID links this project to its parent in the project tree (nil = a top-level
+	// root project). Children inherit the parent's resources (pipelines, boards, …) by
+	// reference, so a parent change propagates to children — resolution walks this chain.
+	// Nullable so a root has no parent; AutoMigrate adds the column to existing tables.
+	ParentID        *string   `json:"parent_id,omitempty" gorm:"column:parent_id;index"`
 	CreatedAt       time.Time `json:"created_at"        gorm:"column:created_at;autoCreateTime"`
 	Active          bool      `json:"-"                 gorm:"column:active;default:true"`
 }

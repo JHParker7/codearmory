@@ -53,11 +53,11 @@ type smDoc struct {
 // task/approval/map state must NOT carry Choice.
 type smState struct {
 	// One kind:
-	Run      string         `json:"run,omitempty"`  // inline step: the action it runs
-	Use      string         `json:"use,omitempty"`  // reference: a stored step_id
-	Approval *ApprovalGate  `json:"approval,omitempty"`
-	Map      *smMap         `json:"map,omitempty"`
-	Choice   []smChoice     `json:"choice,omitempty"` // decision kind — no Run/Next
+	Run      string        `json:"run,omitempty"` // inline step: the action it runs
+	Use      string        `json:"use,omitempty"` // reference: a stored step_id
+	Approval *ApprovalGate `json:"approval,omitempty"`
+	Map      *smMap        `json:"map,omitempty"`
+	Choice   []smChoice    `json:"choice,omitempty"` // decision kind — no Run/Next
 	// Task modifiers (Run/Use only):
 	With    map[string]any `json:"with,omitempty"`
 	Timeout int64          `json:"timeout,omitempty"`

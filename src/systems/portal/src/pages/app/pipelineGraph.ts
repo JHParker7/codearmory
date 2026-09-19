@@ -108,6 +108,8 @@ export interface StepRef {
   /** The map region this step belongs to — see MapDef. Mutually exclusive with
    * matrix/scatter, which are the step's OWN fan-out. */
   map_id?: string;
+  /** The loop this step belongs to — see LoopDef. Mutually exclusive with map_id. */
+  loop_id?: string;
 }
 
 /** A directed edge between two steps, identified by STEP NAME — the same identity
@@ -177,6 +179,8 @@ export interface Block {
   approval?: ApprovalGate | null;
   /** The map region this node belongs to (undefined = none). */
   mapId?: string;
+  /** The loop this node belongs to (undefined = none) — see LoopDef. */
+  loopId?: string;
 }
 
 /** Stored steps -> builder blocks, 1:1 and in order. Each block carries its step's
@@ -210,6 +214,7 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
       inline,
       matrix: s.matrix ?? null, scatter: s.scatter ?? null, approval: s.approval ?? null,
       mapId: s.map_id || undefined,
+      loopId: s.loop_id || undefined,
     };
   });
 }
@@ -362,6 +367,8 @@ export interface DisplayNode {
   mapId?: string;
   members?: string[];
   memberUids?: string[];
+  /** The loop this node belongs to (undefined = none) — for the loop badge on the node. */
+  loopId?: string;
   layer: number;
   row: number;
 }
@@ -446,7 +453,7 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       ordered.push({ id, kind: 'map', mapId: mid, name: mid, members, memberUids: memberUidsByMap.get(mid) ?? [] });
       if (branchesNode(id)) ordered.push({ id: decisionId(id), kind: 'decision', sourceName: mid });
     } else {
-      ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name });
+      ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name, loopId: b.loopId });
       if (branchesNode(b.uid)) ordered.push({ id: decisionId(b.uid), kind: 'decision', sourceName: name });
     }
   });
@@ -643,6 +650,9 @@ export function findCycle(blocks: Block[], routes: Route[], defName: (id: string
 export function stepsFromNodes(blocks: Block[]): StepRef[] {
   return stepsFromBlocks(blocks).map((ref, i) => {
     if (blocks[i]?.mapId) ref.map_id = blocks[i].mapId;
+    // Preserve loop membership through a save, exactly like map_id: omitting it
+    // would dissolve the loop the moment the pipeline is re-saved.
+    if (blocks[i]?.loopId) ref.loop_id = blocks[i].loopId;
     return ref;
   });
 }
@@ -732,6 +742,8 @@ export function stepsToPayload(steps: StepRef[]): StepRef[] {
     // field by field, so anything not copied here is silently dropped on save —
     // omitting map_id would dissolve the region the moment the pipeline is re-saved.
     if (s.map_id) ref.map_id = s.map_id;
+    // Loop membership, for the same reason (see stepsFromNodes).
+    if (s.loop_id) ref.loop_id = s.loop_id;
     return ref;
   });
 }

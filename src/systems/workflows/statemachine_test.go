@@ -180,8 +180,8 @@ func TestRoundTrip(t *testing.T) {
 
 func TestSMToModel_Errors(t *testing.T) {
 	cases := map[string]string{
-		"no states":     `{"name":"x","states":{}}`,
-		"no kind":       `{"name":"x","states":{"a":{"next":"b"},"b":{"end":true}}}`,
+		"no states":      `{"name":"x","states":{}}`,
+		"no kind":        `{"name":"x","states":{"a":{"next":"b"},"b":{"end":true}}}`,
 		"unknown target": `{"name":"x","states":{"a":{"run":"r","next":"ghost"}}}`,
 		"end and next":   `{"name":"x","states":{"a":{"run":"r","end":true,"next":"b"},"b":{"run":"r","end":true}}}`,
 	}

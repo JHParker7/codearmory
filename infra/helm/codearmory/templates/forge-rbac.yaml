@@ -15,6 +15,19 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # A lease (POST /leases) holds a sandbox open across many commands, so it is a
+  # bare Pod that forge creates and deletes directly rather than a Job — a Job's
+  # retry/completion semantics are wrong for a sandbox meant to sit idle and be
+  # exec'd into. Without create/delete here, creating a lease fails "forbidden".
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
+  # Commands are delivered into a held sandbox over the exec subresource, which
+  # starts a new process in the existing container. This is the grant that makes a
+  # lease save anything: without it forge can hold a sandbox but not use it.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
   # Shared workspace volumes are backed by PersistentVolumeClaims that forge
   # provisions (POST /volumes), mounts into execution pods, and deletes at run end
   # (plus an age-based reaper for orphans). Without these verbs the create-volume

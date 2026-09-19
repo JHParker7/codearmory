@@ -279,6 +279,15 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 
 	meterTicketsCreated.Add(ctx, 1, metric.WithAttributes(attribute.String("priority", t.Priority)))
 	notifyEvents(ctx, eventTicketCreated, t, nil)
+	// A ticket created directly in a status counts as a transition INTO that status
+	// (empty -> t.Status): emit status_changed too, so a trigger keyed on
+	// ticket.status_changed (e.g. the requests board's in_progress -> agent chain)
+	// fires on create-in-status, not only on a later move. The trigger's own
+	// data.status filter decides which statuses actually act.
+	notifyEvents(ctx, eventTicketStatus, t, map[string]any{
+		"old_status": "",
+		"new_status": t.Status,
+	})
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "ticket created", "ticket_id", t.TicketID, "user_id", userID)
@@ -331,6 +340,17 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.ErrorContext(ctx, "list tickets: db error", "user_id", userID, "error", err)
+		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
+		return
+	}
+
+	// Dependencies are loaded for listings, though comments are not: deciding
+	// which of these tickets can be worked now is a main reason to ask for a
+	// listing, and answering it per-ticket would be an N+1.
+	if err := loadDependencies(ctx, tickets, userID, orgID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db query failed")
+		slog.ErrorContext(ctx, "list tickets: dependencies error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
 		return
 	}
@@ -389,8 +409,19 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	t.Comments = comments
 
+	one := []Ticket{t}
+	if err := loadDependencies(ctx, one, userID, orgID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		slog.ErrorContext(ctx, "get ticket: dependencies error", "ticket_id", id, "user_id", userID, "error", err)
+		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
+		return
+	}
+	t = one[0]
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
+	setTicketETag(w, t)
 	json.NewEncoder(w).Encode(t) //nolint:errcheck
 }
 
@@ -555,10 +586,43 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		existing.ParentID = newParentID
 	}
 
-	if err := existing.Update(ctx); err != nil {
-		span.RecordError(err)
+	// Optimistic concurrency. An unconditional request keeps the previous
+	// last-write-wins behaviour; If-Match makes the write conditional on nobody
+	// having changed the ticket since the caller read it.
+	cond, ok := parseIfMatch(r.Header)
+	if !ok {
+		http.Error(w, "invalid If-Match header: expected a quoted version, a comma-separated list, or *", http.StatusBadRequest)
+		return
+	}
+	span.SetAttributes(
+		attribute.Bool("ticket.conditional", cond.present),
+		attribute.Int64("ticket.version", existing.Version),
+	)
+
+	var updateErr error
+	if cond.present && !cond.any {
+		updateErr = existing.UpdateIfVersion(ctx, cond.version)
+		if errors.Is(updateErr, ErrVersionConflict) {
+			// Re-read so the client is told the version it must rebase onto,
+			// rather than merely that it lost.
+			current, ferr := getTicket(ctx, id)
+			if ferr != nil {
+				http.Error(w, "ticket was modified by someone else", http.StatusPreconditionFailed)
+				return
+			}
+			span.SetStatus(codes.Ok, "")
+			slog.InfoContext(ctx, "ticket update rejected: version conflict",
+				"ticket_id", id, "user_id", userID, "expected", cond.version, "current", current.Version)
+			writePreconditionFailed(w, current.Version)
+			return
+		}
+	} else {
+		updateErr = existing.Update(ctx)
+	}
+	if updateErr != nil {
+		span.RecordError(updateErr)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.ErrorContext(ctx, "update ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update ticket: db error", "ticket_id", id, "user_id", userID, "error", updateErr)
 		http.Error(w, "failed to update ticket", http.StatusInternalServerError)
 		return
 	}
@@ -596,6 +660,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "ticket updated", "ticket_id", id, "user_id", userID, "status", req.Status)
 	w.Header().Set("Content-Type", "application/json")
+	setTicketETag(w, t)
 	json.NewEncoder(w).Encode(t) //nolint:errcheck
 }
 
@@ -641,6 +706,17 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "delete ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete ticket", http.StatusInternalServerError)
 		return
+	}
+
+	// Drop every dependency edge touching this ticket, in BOTH directions.
+	// Otherwise deleting a blocker leaves the tickets waiting on it blocked by
+	// something that no longer exists — permanently unworkable, with nothing left
+	// to explain why. Best-effort: the ticket is already gone, and failing the
+	// request here would report a delete that in fact happened.
+	if err := removeDependenciesOf(ctx, id); err != nil {
+		span.RecordError(err)
+		slog.ErrorContext(ctx, "delete ticket: dependency cleanup failed; tickets may be left blocked by a deleted ticket",
+			"ticket_id", id, "user_id", userID, "error", err)
 	}
 
 	notifyEvents(ctx, eventTicketDeleted, t, nil)

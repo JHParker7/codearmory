@@ -235,23 +235,30 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 				maps.Copy(merged, creds)
 				exec.Env = merged // local copy only; Complete() never writes env back
 			}
-			result, runErr = rt.Run(runCtx, exec)
-			// Kata/gVisor sandbox-teardown artifact: when the guest VM/sandbox is torn
-			// down at the end of a run the shim can occasionally not read the real exit
-			// code and reports 255 with no stderr — even though the command succeeded
-			// (downstream steps that reuse the workspace prove it ran). A GENUINE failure
-			// under the runner's `set -e` shell writes to stderr, so an empty-stderr 255
-			// on a kernel-isolated backend is almost always spurious. Retry once: the
-			// sandboxed work (git checkout, kaniko build) is idempotent, so a real
-			// transient recovers and a persistent 255 surfaces on the second attempt. The
-			// retry uses a fresh job name (deleteJob is foreground-but-async, so the first
-			// job may still be terminating) while the DB record keeps the real ID.
-			if runErr == nil && runCtx.Err() == nil && isSandboxTeardownArtifact(result) && isKernelIsolatedBackendType(defaultRuntimeType()) {
-				slog.WarnContext(ctx, "worker: kernel-isolated backend reported exit 255 with empty stderr (sandbox-teardown artifact) — retrying once",
-					"execution_id", exec.ExecutionID)
-				retryExec := exec
-				retryExec.ExecutionID = exec.ExecutionID + "-r1"
-				result, runErr = rt.Run(runCtx, retryExec)
+			if exec.LeaseID != "" {
+				// The sandbox already exists and outlives this command, so none of the
+				// job path applies: there is nothing to create, nothing to tear down,
+				// and therefore no teardown artifact to retry around.
+				result, runErr = runLeasedExec(runCtx, rt, exec)
+			} else {
+				result, runErr = rt.Run(runCtx, exec)
+				// Kata/gVisor sandbox-teardown artifact: when the guest VM/sandbox is torn
+				// down at the end of a run the shim can occasionally not read the real exit
+				// code and reports 255 with no stderr — even though the command succeeded
+				// (downstream steps that reuse the workspace prove it ran). A GENUINE failure
+				// under the runner's `set -e` shell writes to stderr, so an empty-stderr 255
+				// on a kernel-isolated backend is almost always spurious. Retry once: the
+				// sandboxed work (git checkout, kaniko build) is idempotent, so a real
+				// transient recovers and a persistent 255 surfaces on the second attempt. The
+				// retry uses a fresh job name (deleteJob is foreground-but-async, so the first
+				// job may still be terminating) while the DB record keeps the real ID.
+				if runErr == nil && runCtx.Err() == nil && isSandboxTeardownArtifact(result) && isKernelIsolatedBackendType(defaultRuntimeType()) {
+					slog.WarnContext(ctx, "worker: kernel-isolated backend reported exit 255 with empty stderr (sandbox-teardown artifact) — retrying once",
+						"execution_id", exec.ExecutionID)
+					retryExec := exec
+					retryExec.ExecutionID = exec.ExecutionID + "-r1"
+					result, runErr = rt.Run(runCtx, retryExec)
+				}
 			}
 			if marker != "" && runErr == nil {
 				result.Stdout, result.Outputs = parseOutputEnv(result.Stdout, exec.OutputEnv, marker)
@@ -281,6 +288,26 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 
 	if err := exec.Complete(ctx, status, result); err != nil {
 		slog.ErrorContext(ctx, "worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
+	}
+
+	// AND AGAIN ON THE WAY OUT. The lease was touched before the command started,
+	// which keeps a long command from looking idle while it runs — but it leaves
+	// last_used_at pinned at DISPATCH, so the moment the command finishes the lease
+	// is retroactively as idle as the command was long.
+	//
+	// Measured: an 8m16s agent command returned successfully, the reaper saw
+	// idle_secs=496 against a 300s limit in the same instant, and the caller's very
+	// next submission — the verification of the work that had just succeeded — was
+	// refused because the sandbox had been torn down underneath it. The stage
+	// failed on work it had actually done.
+	//
+	// Idle has to mean "nothing has been running or finishing here recently", so the
+	// window starts when the sandbox actually went quiet.
+	if exec.LeaseID != "" {
+		if err := touchLease(ctx, exec.LeaseID); err != nil {
+			slog.WarnContext(ctx, "worker: could not record lease completion",
+				"lease_id", exec.LeaseID, "error", err)
+		}
 	}
 }
 
@@ -344,4 +371,38 @@ func parseOutputEnv(stdout string, names []string, marker string) (string, map[s
 		out = nil
 	}
 	return before, out
+}
+
+// runLeasedExec dispatches a command into a sandbox the caller already holds.
+//
+// It re-reads the lease rather than trusting the check submit made, because the
+// two are separated by the queue: a lease that was ready at submit can have been
+// released, reaped for idleness, or hit its lifetime by the time a worker picks
+// the command up. Running into a sandbox that no longer exists would surface as an
+// opaque transport error, so the state is confirmed here where it can be reported
+// as what it is.
+func runLeasedExec(ctx context.Context, rt Runtime, exec Execution) (RunResult, error) {
+	lease, err := getLease(ctx, exec.LeaseID)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("lease %s: %w", exec.LeaseID, err)
+	}
+	if lease.UserID != exec.UserID {
+		// Ownership is re-checked for the same reason the state is: this is the last
+		// point before a command enters someone's sandbox, and it costs one comparison.
+		return RunResult{}, fmt.Errorf("lease %s does not belong to this execution's user", exec.LeaseID)
+	}
+	if lease.Status != leaseReady {
+		return RunResult{}, fmt.Errorf("lease %s is %s, not ready", exec.LeaseID, lease.Status)
+	}
+	lr, ok := rt.(LeaseRuntime)
+	if !ok {
+		return RunResult{}, fmt.Errorf("backend %q does not support leases", exec.Backend)
+	}
+	// Record the use before running, not after: the idle reaper's job is to collect
+	// sandboxes nobody is using, and a long command would otherwise look idle for its
+	// whole duration and be torn down mid-run.
+	if err := touchLease(ctx, exec.LeaseID); err != nil {
+		slog.WarnContext(ctx, "worker: could not record lease use", "lease_id", exec.LeaseID, "error", err)
+	}
+	return lr.Exec(ctx, lease, exec)
 }

@@ -342,20 +342,26 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}
-	// File into a project when asked and permitted (developer/admin/owner). A slug that
-	// resolves to no accessible project is kept as a plain label; a project the caller
-	// may only view is refused rather than silently downgraded.
-	if req.Project != "" {
-		re.Project = req.Project
-		bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !projectAllowsRepoAction(ctx, bearer, "createRepo", p.Slug) {
-				http.Error(w, "you cannot create repos in project "+p.Slug, http.StatusForbidden)
-				return
-			}
-			re.ProjectID, re.ProjectNamespace = p.ProjectID, p.Namespace
-		}
+	// Every repo must belong to a project — no projectless resources. The slug must
+	// resolve to a real project the caller may create repos in; an empty or
+	// unresolvable project is rejected (400) rather than silently kept as a free-text
+	// label, and a project the caller may only view is refused (403).
+	if req.Project == "" {
+		http.Error(w, "project is required", http.StatusBadRequest)
+		return
 	}
+	re.Project = req.Project
+	bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	p := resolveProjectSlug(ctx, bearer, req.Project)
+	if p == nil {
+		http.Error(w, "unknown project "+req.Project, http.StatusBadRequest)
+		return
+	}
+	if !projectAllowsRepoAction(ctx, bearer, "createRepo", p.Slug) {
+		http.Error(w, "you cannot create repos in project "+p.Slug, http.StatusForbidden)
+		return
+	}
+	re.ProjectID, re.ProjectNamespace = p.ProjectID, p.Namespace
 	if err := re.Add(ctx); err != nil {
 		if isUniqueViolation(err) {
 			http.Error(w, "a Repo with this name already exists", http.StatusConflict)
@@ -385,6 +391,65 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 
 	re, _, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "getRepo")
 	if !ok {
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	writeJSON(w, http.StatusOK, re)
+}
+
+// handleResolveRepo returns a repo by its namespace+name, so a caller that only knows
+// the human path can obtain the uuid the PR routes are keyed on. It exists for the
+// workflow actions: git-factory's JSON REST is id-keyed, but a workflow only has the
+// namespace/name, so this is the first hop that yields the id to chain into
+// create-pull/pr-comment/merge. Same authz as getRepo (a denial reads as 404).
+//
+// It is a POST that reads namespace/name from a JSON body, with a query-param fallback
+// for direct GET callers. POST-for-a-read is deliberate: measured on the gf-action-smoke
+// run, the workflows engine sends a step's `with` map only as a JSON body or into {param}
+// path placeholders — it has no query-string path (worker.go executeAction). A GET action
+// reading r.URL.Query() never received the params, and a {namespace}/{name} path form
+// collides with GET /repos/{id}/commits/{sha} in the mux (both 4-segment, neither more
+// specific), so a body-carrying POST is the only shape the engine can drive here.
+func handleResolveRepo(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleResolveRepo")
+	defer span.End()
+
+	if r.Header.Get("Authorization") == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	namespace, name := r.URL.Query().Get("namespace"), r.URL.Query().Get("name")
+	if namespace == "" || name == "" {
+		var req struct {
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+		}
+		// Body is optional for the GET/query form; ignore decode errors and let the
+		// emptiness check below produce the actionable 400.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		namespace, name = req.Namespace, req.Name
+	}
+	if namespace == "" || name == "" {
+		http.Error(w, "namespace and name are required (JSON body or query params)", http.StatusBadRequest)
+		return
+	}
+	re, err := getRepoByPath(ctx, namespace, name)
+	if err != nil {
+		if errors.Is(err, errRepoNotFound) {
+			http.Error(w, "Repo not found", http.StatusNotFound)
+			return
+		}
+		slog.ErrorContext(ctx, "resolve repo", "namespace", namespace, "name", name, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	// A denial reads as 404, mirroring authorizeRepo, so this endpoint can't be used to
+	// probe the existence of repos the caller may not see.
+	aw := &notFoundOnDeny{ResponseWriter: w}
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, aw, r, "getRepo", resRepoOf(re)); !ok {
+		if aw.swallowed {
+			http.Error(w, "Repo not found", http.StatusNotFound)
+		}
 		return
 	}
 	span.SetStatus(codes.Ok, "")
@@ -749,6 +814,48 @@ func handleGetReadme(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── refs ────────────────────────────────────────────────────────────────────
+
+// handleCreateBranch creates a new branch from a base ref (default the repo's HEAD).
+// Body: {"name":"<branch>","from":"<base ref, optional>"}. Create-only: 409 if the
+// branch already exists. Used by the wiki service to open a plan branch on <project>-wiki.
+func handleCreateBranch(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleCreateBranch")
+	defer span.End()
+	re, _, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "writeRepo")
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		From string `json:"from"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.From = strings.TrimSpace(req.From)
+	if !branchNameRe.MatchString(req.Name) {
+		http.Error(w, "invalid branch name", http.StatusBadRequest)
+		return
+	}
+	if req.From != "" && !branchNameRe.MatchString(req.From) {
+		http.Error(w, "invalid base ref", http.StatusBadRequest)
+		return
+	}
+	commit, err := createBranch(ctx, re.ID, req.Name, req.From)
+	if err != nil {
+		if errors.Is(err, errBranchExists) {
+			http.Error(w, "branch already exists", http.StatusConflict)
+			return
+		}
+		slog.ErrorContext(ctx, "create branch", "Repo_id", re.ID, "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	writeJSON(w, http.StatusCreated, map[string]any{"name": req.Name, "commit": commit})
+}
 
 func handleListBranches(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleListBranches")

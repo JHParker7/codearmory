@@ -374,6 +374,8 @@ type createWorkflowRequest struct {
 	Routes []WorkflowRoute `json:"routes,omitempty"`
 	// Maps declare the map regions steps join via map_id — see MapDef.
 	Maps []MapDef `json:"maps,omitempty"`
+	// Loops declare the loops steps join via loop_id — see LoopDef.
+	Loops []LoopDef `json:"loops,omitempty"`
 	// Ticket opts every run of this workflow into being mirrored to a ticket — see
 	// TicketConfig. Omit it and nothing changes.
 	Ticket *TicketConfig `json:"ticket,omitempty"`
@@ -544,28 +546,38 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Outputs:     req.Outputs,
 		Routes:      req.Routes,
 		Maps:        req.Maps,
+		Loops:       req.Loops,
 		Ticket:      req.Ticket,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 	}
 
-	// If Project names a real gatekeeper project the caller can reach, file the
-	// pipeline into it — but only if the caller may create within it (developer/admin/
-	// owner). A slug that resolves to nothing stays a free-text label (unchanged
-	// behaviour); a slug the caller may only view is refused rather than silently
-	// downgraded to a label.
-	if req.Project != "" {
+	// Every pipeline must belong to a project — no projectless pipelines. The slug
+	// must resolve to a real gatekeeper project the caller may create within
+	// (developer/admin/owner); an empty or unresolvable project is rejected (400)
+	// rather than silently kept as a free-text label, and a view-only project is
+	// refused (403).
+	if req.Project == "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project is required", http.StatusBadRequest)
+		return
+	}
+	{
 		bearer := r.Header.Get("Authorization")
-		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !checkProjectPermission(ctx, bearer, "createWorkflow", "pipelines", p.Slug, "") {
-				span.SetStatus(codes.Ok, "")
-				http.Error(w, "you cannot create pipelines in project "+p.Slug, http.StatusForbidden)
-				return
-			}
-			wf.ProjectID = p.ProjectID
-			wf.ProjectNamespace = p.Namespace
+		p := resolveProjectSlug(ctx, bearer, req.Project)
+		if p == nil {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "unknown project "+req.Project, http.StatusBadRequest)
+			return
 		}
+		if !checkProjectPermission(ctx, bearer, "createWorkflow", "pipelines", p.Slug, "") {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "you cannot create pipelines in project "+p.Slug, http.StatusForbidden)
+			return
+		}
+		wf.ProjectID = p.ProjectID
+		wf.ProjectNamespace = p.Namespace
 	}
 
 	steps, err := enrichStepRefs(ctx, refs)
@@ -585,7 +597,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps); msg != "" {
+	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps, wf.Loops); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -824,7 +836,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if msg := validateGraph(newSteps, req.Routes, req.Maps); msg != "" {
+	if msg := validateGraph(newSteps, req.Routes, req.Maps, req.Loops); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -835,6 +847,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Description = req.Description
 	existing.Routes = req.Routes
 	existing.Maps = req.Maps
+	existing.Loops = req.Loops
 	// Guard like the timeout and project below: the state_machine document carries no
 	// ticket field, and a state_machine PUT is the round-trippable edit shape (the
 	// enriched steps array fails validateStepRefShape), so an unguarded assignment made

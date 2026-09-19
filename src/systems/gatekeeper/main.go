@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -19,7 +20,6 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -123,12 +123,9 @@ func seedServiceAccounts(ctx context.Context) {
 		}
 		name, key := entry[:idx], entry[idx+1:]
 		coreServiceNames[name] = true
-		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
-		if err != nil {
-			slog.ErrorContext(ctx, "seedServiceAccounts: bcrypt failed", "name", name, "error", err)
-			continue
-		}
-		upsertServiceAccountDB(ctx, name, string(hash))
+		// Hashing a high-entropy key cannot fail, so there is no error to handle
+		// here any more — bcrypt's could, which is why this used to branch.
+		upsertServiceAccountDB(ctx, name, hashServiceKey(key))
 	}
 }
 
@@ -251,6 +248,29 @@ func main() {
 	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
+
+	// PPROF, OFF UNLESS ASKED FOR. A service that burns CPU with no request to
+	// explain it cannot be diagnosed by reading code — measured on the local plane,
+	// gatekeeper held a full core while every request took a millisecond, and two
+	// plausible-sounding theories (bcrypt, then tracing) were both wrong. A profile
+	// answers in twenty seconds what guessing did not answer in an hour.
+	//
+	// A SEPARATE LISTENER, never the main mux: these endpoints are unauthenticated
+	// and dump memory contents and stack traces. Binding them to the service port
+	// would publish that to anything that can reach the API.
+	if addr := strings.TrimSpace(os.Getenv("GATEKEEPER_PPROF_ADDR")); addr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+			slog.Warn("pprof listener enabled: it is unauthenticated and must not be reachable from outside the cluster", "addr", addr)
+			srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			if err := srv.ListenAndServe(); err != nil {
+				slog.Error("pprof listener stopped", "error", err)
+			}
+		}()
+	}
 
 	certFile := os.Getenv("TLS_CERT_FILE")
 	keyFile := os.Getenv("TLS_KEY_FILE")
@@ -411,6 +431,7 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /projects", mw(handleListProjects))
 	mux.Handle("GET /projects/accessible", mw(handleListAccessibleProjects))
 	mux.Handle("GET /projects/{id}", mw(handleGetProject))
+	mux.Handle("GET /projects/{id}/ancestors", mw(handleGetProjectAncestors))
 	mux.Handle("PUT /projects/{id}", mw(handleUpdateProject))
 	mux.Handle("DELETE /projects/{id}", mw(handleDeleteProject))
 	mux.Handle("POST /projects/{id}/members", mw(handleAddProjectMember))

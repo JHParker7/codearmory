@@ -59,6 +59,10 @@ spec:
             - name: REGISTRY_URL
               value: {{ .Values.containers.env.registryUrl | quote }}
             {{- end }}
+            {{- if .Values.containers.env.registryName }}
+            - name: REGISTRY_NAME
+              value: {{ .Values.containers.env.registryName | quote }}
+            {{- end }}
             # gitea_integration is now a non-core service builder deploys on demand;
             # builder deploys it under the fullname-prefixed name on its fixed port 8088.
             # Kept (not removed) so containers always boots; resolves once an admin

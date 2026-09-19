@@ -114,6 +114,7 @@ function PipelineBuilderOverlay({
           matrix: s.matrix ?? null,
           scatter: s.scatter ?? null,
           map_id: s.map_id || undefined,
+          loop_id: s.loop_id || undefined,
         };
       }
       // The GET returns the effective (merged) name/with; recover the raw overrides
@@ -138,6 +139,9 @@ function PipelineBuilderOverlay({
         // Map membership is part of the pipeline's shape, not the step definition —
         // dropping it here would silently dissolve the region on the next save.
         map_id: s.map_id || undefined,
+        // Loop membership, same reason — and without it the loop enclosure/badge never
+        // draw because the blocks would carry no loopId.
+        loop_id: s.loop_id || undefined,
       };
     }) : [],
     [initial, catalog],
@@ -457,6 +461,11 @@ function PipelineBuilderOverlay({
         // in steps[] order), so a route-less graph saves as the sequence it is.
         routes: routes.length > 0 ? routes : undefined,
         maps: maps.length > 0 ? maps : undefined,
+        // Carried through unchanged, like the ticket config below: this editor does not
+        // yet edit loops, and the step round-trip preserves each member's loop_id, so a
+        // save must keep the loop definitions too — omitting them would dissolve every
+        // loop the moment the pipeline is re-saved.
+        loops: initial?.loops && initial.loops.length > 0 ? initial.loops : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
         outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
         // Pipeline-level run timeout; 0 leaves the backend default (30m) in force.
@@ -519,7 +528,7 @@ function PipelineBuilderOverlay({
       )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={routesSeed} initialMaps={mapsSeed}
+          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={routesSeed} initialMaps={mapsSeed} initialLoops={initial?.loops ?? []}
             catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
             onChange={onGraphChange} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
@@ -670,10 +679,22 @@ function PipelinesTab() {
   // Current-project view filter — refetch whenever it changes so the list tracks
   // the sidebar switcher.
   const project = useAppSelector(s => s.project.current);
+  // Scope is EXACT-PROJECT: the selected project shows only its OWN pipelines and runs,
+  // never a parent's or a child's (project isolation — no hierarchy inheritance).
+
+  // A run is in scope when its own project equals the selected one (no project selected
+  // = all projects). Runs are fetched per-pipeline, so this keeps the view exact.
+  const runInScope = useCallback(
+    (r: WorkflowRun) => !project || r.project === project,
+    [project],
+  );
 
   const fetchWorkflows = useCallback(async () => {
     setLoading(true); setError(null);
-    try { setWorkflows(await listWorkflows(token, project ?? undefined)); }
+    try {
+      const all = await listWorkflows(token);
+      setWorkflows(project ? all.filter(w => w.project === project) : all);
+    }
     catch (e: unknown) { setError((e as Error).message); }
     finally { setLoading(false); }
   }, [token, project]);
@@ -696,7 +717,7 @@ function PipelinesTab() {
   useEffect(() => {
     if (!selected || !liveRun) return;
     const id = setInterval(async () => {
-      try { setRuns(await listWorkflowRuns(token, selected)); } catch { /* keep last good */ }
+      try { setRuns((await listWorkflowRuns(token, selected)).filter(runInScope)); } catch { /* keep last good */ }
     }, 2500);
     return () => clearInterval(id);
   }, [selected, liveRun, token]);
@@ -710,7 +731,7 @@ function PipelinesTab() {
     getWorkflow(token, id)
       .then(full => setWorkflows(prev => prev.map(w => w.workflow_id === id ? full : w)))
       .catch(() => { /* keep the list entry on a transient error */ });
-    try { setRuns(await listWorkflowRuns(token, id)); }
+    try { setRuns((await listWorkflowRuns(token, id)).filter(runInScope)); }
     catch { setRuns([]); }
     finally { setRunsLoading(false); }
   }, [token]);
@@ -735,7 +756,7 @@ function PipelinesTab() {
     }
     setTriggering(true);
     try {
-      const run = await triggerWorkflow(token, selected, inputs);
+      const run = await triggerWorkflow(token, selected, inputs, project ?? undefined);
       setRuns(prev => [run, ...prev]);
       navigate(`/app/workflows/runs/${run.run_id}`); // straight to the new run's live page
     } catch (e: unknown) { setError((e as Error).message); }
@@ -779,6 +800,7 @@ function PipelinesTab() {
         scatter: s.scatter ?? null,
         approval: s.approval ?? null,
         map_id: s.map_id || undefined,
+        loop_id: s.loop_id || undefined,
       };
     }) : [],
     [selectedWorkflow],
@@ -909,7 +931,7 @@ function PipelinesTab() {
                       draw one pipeline the same way. A pipeline with no stored
                       routes shows the edges derived from its ordered steps. */}
                   <div style={{ height: 300, marginBottom: 20 }}>
-                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} initialMaps={selectedWorkflow.maps ?? []} catalog={catalogMap} />
+                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} initialMaps={selectedWorkflow.maps ?? []} initialLoops={selectedWorkflow.loops ?? []} catalog={catalogMap} />
                   </div>
                 </>
               )}

@@ -444,6 +444,118 @@ paths:
               schema:
                 type: string
 
+  /leases:
+    post:
+      operationId: createLease
+      summary: Hold a sandbox open across many commands
+      description: |
+        Boots a sandbox and holds it, so subsequent executions can run inside it
+        instead of each creating their own. The saving is the whole sandbox
+        startup, which on a kernel-isolated backend (kata, gvisor) is most of a
+        short command's wall time — an agent running ten commands against one
+        checkout pays the boot once rather than ten times.
+
+        The boot happens in the background: this returns `202` with a lease in
+        `starting`, and the caller polls `GET /leases/{id}` until it reports
+        `ready` before submitting executions against it.
+
+        A lease is never recycled between callers. It is created for one unit of
+        work and destroyed with it, so a compromised sandbox cannot outlive the
+        work that compromised it — the property the one-shot model gives you, kept.
+
+        Release it with `DELETE /leases/{id}` as soon as the work is done: a held
+        sandbox is reserved memory. The idle and lifetime timeouts exist for
+        callers that crash, not as the expected way to end a lease.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLeaseRequest'
+      responses:
+        '202':
+          description: Lease accepted; poll for readiness
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lease_id:
+                    type: string
+                  status:
+                    type: string
+                    example: starting
+        '400':
+          description: Invalid request, image not allowed, or the backend cannot hold a sandbox
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          description: The caller already holds the maximum number of leases
+    get:
+      operationId: listLease
+      summary: List the caller's leases
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Leases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  leases:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Lease'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /leases/{id}:
+    get:
+      operationId: getLease
+      summary: Get a lease's state
+      description: |
+        Polled after create to learn the sandbox is up. `status` is one of
+        `starting`, `ready`, `stopped` or `failed`; `detail` explains a failure.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lease'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No such lease (also returned for a lease the caller does not own)
+    delete:
+      operationId: deleteLease
+      summary: Release a lease and destroy its sandbox
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Released
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No such lease (also returned for a lease the caller does not own)
   /volumes:
     post:
       operationId: createVolume
@@ -570,6 +682,15 @@ components:
           type: string
           description: Container image. Must be in the operator-configured allowlist.
           example: alpine:3.19
+        lease_id:
+          type: string
+          description: |
+            Run this command inside a sandbox the caller already holds
+            (POST /leases) rather than creating one for it, skipping the whole
+            sandbox startup. `image`, `runner_class` and `volumes` are inherited
+            from the lease and must not be set; `checkout` and `secret_refs` are
+            rejected (the lease already cloned, and its environment is fixed at
+            boot). The lease must be `ready`, or the request is refused with 409.
         command:
           type: array
           items:
@@ -803,6 +924,102 @@ components:
             Set the container working directory to `mount_path`, so the command
             runs inside the shared volume (e.g. a checked-out repo). At most one
             attached volume per execution may set this.
+
+    CreateLeaseRequest:
+      type: object
+      required: [image]
+      properties:
+        image:
+          type: string
+          description: Container image for the held sandbox. Must be in the operator-configured allowlist.
+          example: alpine:3.19
+        runner_class:
+          type: string
+          description: Runner class fixing the sandbox's CPU/memory/pids limits for its whole life. Defaults to `standard`.
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Environment injected into the sandbox at boot. Fixed for the lease's
+            life — a container's environment is set when it starts, so a later
+            exec cannot change it.
+        secret_refs:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Credential references resolved once at boot and injected into the
+            sandbox environment. Same schemes as SubmitRequest. An execution
+            running in a lease may NOT carry its own: honouring those would mean
+            passing resolved secrets through the command's argv, where anything
+            else in the sandbox could read them from /proc.
+        volumes:
+          type: array
+          items:
+            $ref: '#/components/schemas/VolumeMount'
+          description: Shared volumes attached at boot and visible to every command. A mount setting `workdir` becomes the lease's working directory.
+        checkout:
+          $ref: '#/components/schemas/CheckoutSpec'
+        project:
+          type: string
+          description: Workspace label; widens access to project members when it resolves to a real project.
+        idle_timeout:
+          type: integer
+          description: |
+            Seconds without a command before the lease is reaped, measured from
+            the last execution dispatched against it. Clamped to
+            FORGE_LEASE_IDLE_TIMEOUT_SECS and never above `max_lifetime`.
+          example: 300
+        max_lifetime:
+          type: integer
+          description: Total seconds a lease may live regardless of use. Clamped to FORGE_LEASE_MAX_LIFETIME_SECS.
+          example: 3600
+
+    Lease:
+      type: object
+      properties:
+        lease_id:
+          type: string
+        user_id:
+          type: string
+        image:
+          type: string
+        runner_class:
+          type: string
+        backend:
+          type: string
+        volumes:
+          type: array
+          items:
+            $ref: '#/components/schemas/VolumeMount'
+        status:
+          type: string
+          enum: [starting, ready, stopped, failed]
+          description: |
+            `starting` while the sandbox boots and any checkout runs; `ready`
+            once it accepts commands; `stopped` after release or reaping;
+            `failed` when it never came up.
+        detail:
+          type: string
+          description: Why a failed lease did not start, or why a stopped one was reaped.
+        idle_timeout:
+          type: integer
+        max_lifetime:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          description: When a command was last dispatched into the sandbox; the idle timeout measures from here.
+        ended_at:
+          type: string
+          format: date-time
 
     CreateVolumeRequest:
       type: object

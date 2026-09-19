@@ -55,14 +55,18 @@ func getUserByEmail(ctx context.Context, email string) (User, error) {
 	return user, nil
 }
 
-// ── Misc write helpers ────────────────────────────────────────────────────────
-
-// syncServiceAccountBootstrapKey updates the hashed_key column to match the
-// bootstrap hash after the bootstrap key fallback path succeeds in requireServiceAuth.
-func syncServiceAccountBootstrapKey(ctx context.Context, name, hash string) error {
+// upgradeServiceKeyHash rewrites a legacy bcrypt hash in the cheap format, after
+// the key has already been verified.
+//
+// Both columns are written, because either can be the one that authenticated and
+// leaving the other in the old format would keep paying for it. Nothing here
+// changes what the key IS — only how it is stored — so a service that is
+// authenticating successfully keeps doing so.
+func upgradeServiceKeyHash(ctx context.Context, name, key string) error {
+	hash := hashServiceKey(key)
 	return connect().WithContext(ctx).Model(&ServiceAccount{}).
-		Where("service_name = ?", name).
-		Update("hashed_key", hash).Error
+		Where("service_name = ? AND hashed_key NOT LIKE ?", name, serviceKeyScheme+"%").
+		Updates(map[string]any{"hashed_key": hash}).Error
 }
 
 // getUserIDsByOrg returns the user_id of all users in an org.

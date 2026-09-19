@@ -29,7 +29,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -1135,7 +1134,7 @@ func realClientIP(r *http.Request) string {
 }
 
 // requireServiceAuth validates the X-Service-Key header (format "name:key") against the
-// stored bcrypt hash for the named ServiceAccount. Returns the account on success.
+// stored hash for the named ServiceAccount. Returns the account on success.
 func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount, bool) {
 	header := r.Header.Get("X-Service-Key")
 	if header == "" {
@@ -1155,19 +1154,46 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 		return ServiceAccount{}, false
 	}
 	svc := row.(ServiceAccount)
-	if err := bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte(key)); err != nil {
-		// Fall back to the bootstrap key. This lets a service pod re-authenticate
-		// after a restart when the rotated key was only stored in memory. On
-		// success, HashedKey is reset to the bootstrap hash so the service can
-		// immediately call /service-accounts/rotate-key to re-establish rotation.
-		if svc.HashedBootstrapKey == "" || bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte(key)) != nil {
+	// THIS RUNS ON EVERY AUTHENTICATED REQUEST, so what it costs is multiplied by
+	// the platform's entire call volume. It used to be bcrypt at cost 12 — around
+	// a quarter-second of CPU each — which held a core busy under nothing more
+	// than a status window polling. See service_key.go for why a machine-generated
+	// key needs no key-stretching at all.
+	ok, upgrade := verifyServiceKey(svc.HashedKey, key)
+	if !ok {
+		// Fall back to the bootstrap key so a service pod that restarted (and lost its
+		// in-memory rotated key) can re-authenticate and re-rotate from its seed.
+		//
+		// We do NOT touch hashed_key here. Resetting it to the bootstrap hash — which
+		// this used to do — clobbered a LIVE pod's still-valid rotated key whenever the
+		// bootstrap key was presented out-of-band (an operator script, or any second
+		// caller sharing the service identity): gatekeeper accepted the bootstrap key,
+		// overwrote hashed_key with it, and the running pod's very next call with its
+		// rotated key then 401'd. That "key mismatch" hung agent role-mints and
+		// workflow run-token mints for minutes — measured 2026-09-09 driving the agent
+		// pipeline while minting run-tokens through the workflows service key. Leaving
+		// the rotated hashed_key intact lets both keys stay valid at once; restart
+		// recovery still works because rotate-key also accepts the bootstrap key, so a
+		// restarted pod re-rotates from its seed without any resync.
+		bootOK, _ := verifyServiceKey(svc.HashedBootstrapKey, key)
+		if !bootOK {
 			slog.WarnContext(r.Context(), "service auth rejected: key mismatch", "service", name)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return ServiceAccount{}, false
 		}
-		slog.WarnContext(r.Context(), "service auth: bootstrap key fallback used; service will re-rotate", "service", name)
-		if err2 := syncServiceAccountBootstrapKey(r.Context(), name, svc.HashedBootstrapKey); err2 != nil {
-			slog.ErrorContext(r.Context(), "service auth: failed to sync hashed_key from bootstrap", "service", name, "error", err2)
+		// upgrade stays false: the cheap-format rewrite below targets hashed_key, and
+		// rewriting it from the BOOTSTRAP key would be the same clobber by another path.
+		upgrade = false
+		slog.WarnContext(r.Context(), "service auth: bootstrap key fallback used", "service", name)
+	}
+	if upgrade {
+		// Rewrite the stored hash in the cheap format, so the expensive comparison
+		// is paid once per key rather than once per request. Best effort: a failed
+		// upgrade costs performance, never access, so it must not fail the request
+		// that just authenticated correctly.
+		if err := upgradeServiceKeyHash(r.Context(), name, key); err != nil {
+			slog.WarnContext(r.Context(), "could not upgrade the stored service-key hash; auth stays on the slow path",
+				"service", name, "error", err)
 		}
 	}
 
@@ -1223,13 +1249,13 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 
 // rotationMu holds a per-service-name mutex to serialise concurrent rotation
 // requests for the same account. Without this, two simultaneous calls would
-// both pass bcrypt verification against the old key, each generate a different
+// both pass verification against the old key, each generate a different
 // new key, and the loser's stored value would be silently overwritten — leaving
 // that service instance permanently locked out until it is restarted.
 var rotationMu sync.Map
 
 // handleRotateServiceKey generates a new random 32-byte key for the authenticated
-// service account, stores its bcrypt hash, and returns the plaintext new key.
+// service account, stores its hash, and returns the plaintext new key.
 // The service must present its current key to authenticate; on success it must
 // immediately start using the returned key for all subsequent requests.
 func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
@@ -1259,16 +1285,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	}
 	newKey := hex.EncodeToString(raw)
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(newKey), 12)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "bcrypt failed")
-		slog.ErrorContext(ctx, "rotate service key: bcrypt failed", "service", svc.ServiceName, "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	svc.HashedKey = string(hash)
+	svc.HashedKey = hashServiceKey(newKey)
 	if err := svc.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")

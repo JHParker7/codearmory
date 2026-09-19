@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -23,12 +24,23 @@ var projectTiers = map[string][]string{
 	"admin":     {"*"},
 }
 
+// NOTE: project scoping is EXACT-PROJECT — a child project's members get NO access to an
+// ancestor's namespace, and a parent's members get none over a child's (per the product
+// decision that a parent's repos/resources must not be reachable from a child, nor the
+// inverse). The project TREE still exists (Project.ParentID) and still governs which
+// project a pipeline may TARGET (workflows pipelineMayTargetProject walks the ancestor
+// chain) — that "a bootstrap/parent pipeline may run for a descendant" path is the one
+// deliberate cross-project relationship kept, and the anchor for a future explicit
+// bootstrap/template concept. What was removed is the automatic cross-namespace *grant*
+// (the former projectUseTiers "use-only" inheritance).
+
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 type createProjectRequest struct {
-	Slug  string  `json:"slug"`
-	Name  string  `json:"name"`
-	OrgID *string `json:"org_id"` // optional; when set the project is owned/managed by the org
+	Slug   string  `json:"slug"`
+	Name   string  `json:"name"`
+	OrgID  *string `json:"org_id"` // optional; when set the project is owned/managed by the org
+	Parent *string `json:"parent"` // optional parent project SLUG; makes this a child in the project tree
 }
 
 type projectMemberRequest struct {
@@ -68,10 +80,10 @@ func provisionTierRole(ctx context.Context, ownerID, slug, tier string) (string,
 		Active:         true,
 	}
 	if err := role.Add(ctx); err != nil {
-		// The permission is a Service "*" / Actions ["*"] wildcard over the project
-		// namespace and is reachable only through the role that was meant to carry it.
-		// Leaving it behind would accumulate an unattached wildcard grant per attempt.
-		if e := perm.Remove(ctx); e != nil {
+		// The permission (a Service "*" wildcard over THIS project's namespace only) is
+		// reachable only through the role that was meant to carry it; leaving it behind
+		// accumulates an unattached grant per attempt.
+		if e := (Permissions{PermissionsID: perm.PermissionsID}).Remove(ctx); e != nil {
 			slog.ErrorContext(ctx, "provision tier role: orphaned permission left behind", "permission_id", perm.PermissionsID, "error", e)
 		}
 		return "", err
@@ -163,12 +175,33 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional parent: records this project's place in the tree (Project.ParentID). The
+	// parent must exist and be active, and the caller must be able to create within the
+	// parent's namespace (its admin/developer) — creating a child is administering the
+	// parent. The tree governs pipeline TARGETING (a parent's pipeline may run for a
+	// descendant), but grants NO resource access across the parent↔child boundary:
+	// scoping is exact-project, so nothing here provisions cross-namespace grants.
+	var parentID *string
+	if req.Parent != nil && strings.TrimSpace(*req.Parent) != "" {
+		parentSlug := strings.TrimSpace(*req.Parent)
+		parent, perr := getProjectBySlug(ctx, parentSlug)
+		if perr != nil || !parent.Active {
+			http.Error(w, "unknown parent project "+parentSlug, http.StatusBadRequest)
+			return
+		}
+		if !requirePermission(w, r, "createProject", "project/"+parent.Slug+"/gatekeeper/projects") {
+			return
+		}
+		parentID = &parent.ProjectID
+	}
+
 	p := Project{
 		ProjectID: uuid.New().String(),
 		Slug:      req.Slug,
 		Namespace: orgNS,
 		Name:      req.Name,
 		OwnerID:   callerID,
+		ParentID:  parentID,
 		CreatedAt: time.Now().UTC(),
 		Active:    true,
 	}
@@ -219,6 +252,16 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	// The creator is the project's first admin.
 	_ = assignMembership(ctx, p.AdminRoleID, callerID, callerID)
+
+	// The wiki bot needs developer membership on every project so it can
+	// resolve the project through git-factory and list/write pages. Without
+	// this, wiki list-pages 500s ("unknown project") on any freshly created
+	// project. Env-gated so non-agent deployments don't grant a phantom user.
+	if botID := os.Getenv("WIKI_BOT_USER_ID"); botID != "" && botID != callerID {
+		if err := assignMembership(ctx, p.DeveloperRoleID, botID, callerID); err != nil {
+			slog.WarnContext(ctx, "wiki bot grant failed", "project_id", p.ProjectID, "bot", botID, "err", err)
+		}
+	}
 
 	slog.InfoContext(ctx, "project created", "project_id", p.ProjectID, "slug", req.Slug, "org", orgNS, "owner", callerID)
 	span.SetStatus(codes.Ok, "")
@@ -284,6 +327,47 @@ func handleGetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// handleGetProjectAncestors returns the project followed by its ancestor chain, root
+// LAST — the effective-scope list for resource inheritance: a child's inherited
+// resources are those of every project in this chain. Membership is checked only on
+// the requested (child) project, not each ancestor: inheriting a parent's resources is
+// exactly a child member seeing them WITHOUT being an ancestor member. The walk stops
+// at a missing/inactive/deleted parent (a dangling link) and is cycle-guarded.
+func handleGetProjectAncestors(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	callerID, _ := ctx.Value(userIDKey).(string)
+	row, err := (Project{ProjectID: r.PathValue("id")}).Get(ctx)
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	p := row.(Project)
+	if !isProjectMember(ctx, callerID, p) {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	chain := []Project{p}
+	seen := map[string]bool{p.ProjectID: true}
+	cur := p
+	for cur.ParentID != nil && *cur.ParentID != "" {
+		if seen[*cur.ParentID] {
+			break // cycle guard — should be impossible, but never loop
+		}
+		prow, perr := (Project{ProjectID: *cur.ParentID}).Get(ctx)
+		if perr != nil {
+			break // dangling parent (e.g. deleted) — stop the chain here
+		}
+		pp := prow.(Project)
+		if !pp.Active {
+			break
+		}
+		chain = append(chain, pp)
+		seen[pp.ProjectID] = true
+		cur = pp
+	}
+	writeJSON(w, http.StatusOK, chain)
 }
 
 func handleUpdateProject(w http.ResponseWriter, r *http.Request) {

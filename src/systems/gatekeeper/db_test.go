@@ -872,10 +872,10 @@ func TestSeedServiceAccounts_CreatesNew(t *testing.T) {
 	if err := gormDB.Where("service_name = ?", name).First(&svc).Error; err != nil {
 		t.Fatalf("expected service account to be created: %v", err)
 	}
-	if bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte("bootstrapkey")) != nil {
+	if func() bool { ok, _ := verifyServiceKey(svc.HashedKey, "bootstrapkey"); return !ok }() {
 		t.Fatal("HashedKey does not match bootstrap key")
 	}
-	if bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte("bootstrapkey")) != nil {
+	if func() bool { ok, _ := verifyServiceKey(svc.HashedBootstrapKey, "bootstrapkey"); return !ok }() {
 		t.Fatal("HashedBootstrapKey does not match bootstrap key")
 	}
 }
@@ -908,10 +908,10 @@ func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
 	if err := gormDB.Where("service_name = ?", name).First(&svc).Error; err != nil {
 		t.Fatalf("expected service account to exist: %v", err)
 	}
-	if bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte("rotatedkey")) != nil {
+	if func() bool { ok, _ := verifyServiceKey(svc.HashedKey, "rotatedkey"); return !ok }() {
 		t.Fatal("rotated key was overwritten by seedServiceAccounts on restart")
 	}
-	if bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte("bootstrapkey")) != nil {
+	if func() bool { ok, _ := verifyServiceKey(svc.HashedBootstrapKey, "bootstrapkey"); return !ok }() {
 		t.Fatal("HashedBootstrapKey was not refreshed to bootstrap key on restart")
 	}
 }

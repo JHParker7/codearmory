@@ -648,10 +648,10 @@ func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
 
 func TestHandleServiceProxy_SpoofHeaders_Stripped(t *testing.T) {
 	var got struct {
-		xUserID   string
-		xFwdHost  string
-		xRealIP   string
-		xFwdFor   string
+		xUserID  string
+		xFwdHost string
+		xRealIP  string
+		xFwdFor  string
 	}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.xUserID = r.Header.Get("X-User-ID")

@@ -308,6 +308,13 @@ type WorkflowStepRef struct {
 	// Matrix/Scatter on the same step, since those are the step's own fan-out and
 	// would nest inside the region's.
 	MapID string `json:"map_id,omitempty"`
+	// LoopID puts this step inside the named loop (see LoopDef): the loop's whole
+	// subgraph is repeated SEQUENTIALLY until the loop's exit condition holds or its
+	// limit is reached. Unlike a map — which fans a body out in parallel over a fixed
+	// value list — a loop repeats the same body in place, so iterations share the one
+	// volume (the tree an earlier iteration left is what the next one works on).
+	// Mutually exclusive with MapID/Matrix/Scatter on the same step.
+	LoopID string `json:"loop_id,omitempty"`
 }
 
 // MapDef declares a map region: a SUBGRAPH repeated once per value.
@@ -368,6 +375,49 @@ type MapDef struct {
 // clone), so the same ceiling is deliberately conservative.
 const maxMapValues = 50
 
+// LoopDef declares a LOOP: a subgraph (the steps sharing its ID) repeated
+// SEQUENTIALLY, in place, until an exit condition holds or a bounded count is
+// reached. It is the retry/converge primitive — "run dev, then verify; if verify
+// failed, run dev again on the same tree; stop when it passes or after N tries."
+//
+// Unlike a map, a loop does NOT fan out and does NOT clone per iteration: the
+// iterations are sequential and share the ONE volume the body mounts, because the
+// whole point is that each pass works on what the last pass left. The repetition
+// is internal to the loop super-node — never a graph back-edge — so the DAG/cycle
+// invariant every other construct relies on is untouched.
+type LoopDef struct {
+	// ID is the loop's name, referenced by WorkflowStepRef.LoopID.
+	ID string `json:"id"`
+	// Limit is the maximum number of iterations. Clamped to [1, loopHardMax]: a
+	// value over the hard max is rejected at validation, and re-clamped at run time
+	// so a dynamically-supplied limit can never exceed it either.
+	Limit int `json:"limit"`
+	// Until is the exit condition: a route-language expression (steps.<name>.status,
+	// steps.<name>.output, steps.<name>.json.<field>) evaluated against the body's
+	// outputs after each iteration. The loop STOPS the first time it is true. Empty
+	// means no early exit — the body runs exactly Limit times (a fixed repeat).
+	Until string `json:"until,omitempty"`
+	// Var, when set, binds the 1-based iteration number for the body to read as
+	// ${loop.<var>} (e.g. an "attempt N of M" line in a prompt). Optional.
+	Var string `json:"var,omitempty"`
+	// Parent, when set, NESTS this loop inside the named loop: this loop's whole
+	// body is one step of the parent's body, so the parent re-runs (and re-draws)
+	// the inner loop's convergence on every outer attempt. Empty is a top-level
+	// loop. The parent's step range must strictly contain this loop's, and the
+	// chain must be acyclic. This is how "re-roll the whole run on dev failure"
+	// (an outer loop) can still let the spec converge locally (an inner loop):
+	// spec/expected-red carry loop_id=<inner>, dev/green loop_id=<outer>, and
+	// <inner>.parent=<outer>.
+	Parent string `json:"parent,omitempty"`
+}
+
+// loopHardMax is the ceiling a loop's Limit is clamped to, no matter what a
+// pipeline asks for — the guard against an expensive definition (or a runaway
+// values_from) spinning a body an unbounded number of times. Matches
+// maxMapValues/maxMatrixValues: a loop iteration is a whole subgraph, so the same
+// conservative bound applies.
+const loopHardMax = 50
+
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.
 // It is assembled at request/execution time and never stored in the DB. For an
 // inline approval gate the Step is synthesised (Action=approval) and Approval
@@ -379,6 +429,8 @@ type WorkflowStep struct {
 	Approval *ApprovalGate  `json:"approval,omitempty"`
 	// MapID is the map region this step belongs to — see MapDef.
 	MapID string `json:"map_id,omitempty"`
+	// LoopID is the loop this step belongs to — see LoopDef.
+	LoopID string `json:"loop_id,omitempty"`
 }
 
 // WorkflowInputDef declares a named input a pipeline accepts. Default is applied
@@ -442,6 +494,10 @@ type Workflow struct {
 	// Maps declare the map regions this workflow contains — see MapDef. A step joins
 	// a region by naming it in WorkflowStepRef.MapID.
 	Maps []MapDef `json:"maps,omitempty" gorm:"column:maps;serializer:json"`
+	// Loops declare the loops this workflow contains — see LoopDef. A step joins a
+	// loop by naming it in WorkflowStepRef.LoopID. A JSON column, so AutoMigrate adds
+	// it and pipelines authored before loops existed read it back empty.
+	Loops []LoopDef `json:"loops,omitempty" gorm:"column:loops;serializer:json"`
 	// Routes are the explicit edges between steps — see WorkflowRoute. Empty means
 	// the edges are DERIVED at load time (deriveRoutes) as a plain chain in array
 	// order, which is why a pipeline authored before routes existed needs no
@@ -477,14 +533,21 @@ func (Workflow) TableName() string { return "workflows" }
 // it is never the triggering user's own session token. RunSessionID tracks the
 // underlying gatekeeper session so it can be revoked on terminal state.
 type WorkflowRun struct {
-	RunID       string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
-	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
-	TriggeredBy string            `json:"triggered_by" gorm:"column:triggered_by"`
-	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
-	Project     string            `json:"project,omitempty" gorm:"column:project;default:''"`
-	Status      string            `json:"status"       gorm:"column:status;default:'pending'"`
-	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
-	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
+	RunID       string `json:"run_id"       gorm:"column:run_id;primaryKey"`
+	WorkflowID  string `json:"workflow_id"  gorm:"column:workflow_id"`
+	TriggeredBy string `json:"triggered_by" gorm:"column:triggered_by"`
+	OrgID       string `json:"org_id"       gorm:"column:org_id;default:''"`
+	Project     string `json:"project,omitempty" gorm:"column:project;default:''"`
+	// ProjectID/ProjectNamespace are copied from the parent Workflow at trigger time,
+	// carrying the resolved project scope onto the run: ProjectID lets list views
+	// widen to a project's members cheaply, ProjectNamespace is the owner namespace a
+	// member's project grant must be qualified with. Both empty ⇒ Project is a plain
+	// label. Added by AutoMigrate; existing rows read back empty.
+	ProjectID        string            `json:"project_id,omitempty"        gorm:"column:project_id;default:''"`
+	ProjectNamespace string            `json:"project_namespace,omitempty" gorm:"column:project_namespace;default:''"`
+	Status           string            `json:"status"       gorm:"column:status;default:'pending'"`
+	CurrentStep      int               `json:"current_step" gorm:"column:current_step;default:0"`
+	Inputs           map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
 	// Outputs is the resolved pipeline-output map, computed from the declared
 	// WorkflowOutputDefs when the run completes; empty until then. Surfaced to a
 	// parent run as the workflows/trigger step's output.

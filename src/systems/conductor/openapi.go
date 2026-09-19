@@ -219,11 +219,11 @@ type openAPITag struct {
 type openAPIPathItem map[string]openAPIOperation
 
 type openAPIOperation struct {
-	Tags        []string              `json:"tags,omitempty"`
-	Summary     string                `json:"summary,omitempty"`
-	OperationID string                `json:"operationId,omitempty"`
-	Parameters  []openAPIParameter    `json:"parameters,omitempty"`
-	Security    []map[string][]string `json:"security"`
+	Tags        []string                   `json:"tags,omitempty"`
+	Summary     string                     `json:"summary,omitempty"`
+	OperationID string                     `json:"operationId,omitempty"`
+	Parameters  []openAPIParameter         `json:"parameters,omitempty"`
+	Security    []map[string][]string      `json:"security"`
 	Responses   map[string]openAPIResponse `json:"responses"`
 }
 

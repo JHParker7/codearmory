@@ -83,21 +83,31 @@ func handleCreateBoard(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   now,
 	}
 
-	// If Project names a real gatekeeper project the caller can reach, file the board
-	// into it — but only if the caller may create within it (developer/admin/owner). A
-	// slug that resolves to nothing stays a free-text label (unchanged behaviour); a
-	// slug the caller may only view is refused rather than silently downgraded.
-	if req.Project != "" {
+	// Every board must belong to a project — no projectless boards (a board is a
+	// project's board; its tickets inherit the board's project). The slug must resolve
+	// to a real gatekeeper project the caller may create within (developer/admin/owner);
+	// an empty or unresolvable project is rejected (400) rather than kept as a free-text
+	// label, and a view-only project is refused (403).
+	if req.Project == "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project is required", http.StatusBadRequest)
+		return
+	}
+	{
 		bearer := r.Header.Get("Authorization")
-		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !checkProjectPermission(ctx, bearer, "createBoard", "boards", p.Slug, "") {
-				span.SetStatus(codes.Ok, "")
-				http.Error(w, "you cannot create boards in project "+p.Slug, http.StatusForbidden)
-				return
-			}
-			b.ProjectID = p.ProjectID
-			b.ProjectNamespace = p.Namespace
+		p := resolveProjectSlug(ctx, bearer, req.Project)
+		if p == nil {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "unknown project "+req.Project, http.StatusBadRequest)
+			return
 		}
+		if !checkProjectPermission(ctx, bearer, "createBoard", "boards", p.Slug, "") {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "you cannot create boards in project "+p.Slug, http.StatusForbidden)
+			return
+		}
+		b.ProjectID = p.ProjectID
+		b.ProjectNamespace = p.Namespace
 	}
 
 	if err := b.Add(ctx); err != nil {

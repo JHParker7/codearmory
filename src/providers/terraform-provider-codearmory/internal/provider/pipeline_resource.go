@@ -125,10 +125,10 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				MarkdownDescription: "The pipeline's steps, in run order. Mutually exclusive with `definition_json`.",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
-						"name":    schema.StringAttribute{Required: true, MarkdownDescription: "Step name (referenced as ${steps.<name>.output})."},
-						"action":  schema.StringAttribute{Required: true, MarkdownDescription: "The action the step runs, e.g. `forge/run`, `forge/build-image`."},
-						"timeout": schema.Int64Attribute{Optional: true, MarkdownDescription: "Per-step timeout in seconds (0 / unset = service default)."},
-						"with":    schema.MapAttribute{ElementType: types.StringType, Optional: true, MarkdownDescription: "Simple string config for the action (e.g. `image`, `run` for `forge/run`)."},
+						"name":      schema.StringAttribute{Required: true, MarkdownDescription: "Step name (referenced as ${steps.<name>.output})."},
+						"action":    schema.StringAttribute{Required: true, MarkdownDescription: "The action the step runs, e.g. `forge/run`, `forge/build-image`."},
+						"timeout":   schema.Int64Attribute{Optional: true, MarkdownDescription: "Per-step timeout in seconds (0 / unset = service default)."},
+						"with":      schema.MapAttribute{ElementType: types.StringType, Optional: true, MarkdownDescription: "Simple string config for the action (e.g. `image`, `run` for `forge/run`)."},
 						"with_json": schema.StringAttribute{Optional: true, MarkdownDescription: "Advanced config as a JSON object string, merged over `with`. Use for nested forge config — `checkout`, `build`, `volumes`, `secret_refs` — that can't be expressed as flat strings."},
 					},
 				},

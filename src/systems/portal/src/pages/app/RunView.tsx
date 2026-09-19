@@ -466,6 +466,7 @@ export function RunView() {
                   initialSteps={workflow?.steps ?? []}
                   initialRoutes={workflow?.routes ?? []}
                   initialMaps={workflow?.maps ?? []}
+                  initialLoops={workflow?.loops ?? []}
                   catalog={catalog}
                   runStatus={runStatus}
                   activeNode={activeNode}

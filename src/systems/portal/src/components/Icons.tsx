@@ -112,12 +112,39 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
 };
 
-/** Render a nav glyph by name; strokes with `currentColor` so the link colour drives it. */
+// Nerd Font (Symbols) codepoints per icon — a subset of the font is bundled (nerdfont.css).
+// Names not listed here fall back to the SVG glyph above, so nothing ever renders blank.
+const NERD: Partial<Record<IconName, number>> = {
+  workflows: 0xf07e5,  // md-pipe (pipeline)
+  builder: 0xf06a9,    // md-robot (the coding agents)
+  tickets: 0xf145,     // fa-ticket
+  blueprints: 0xf02d,  // fa-book (wiki / source of truth)
+  git: 0xe725,         // dev-git_branch (repos)
+  argo: 0xf1e6,        // plug (git connector)
+  forge: 0xf120,       // terminal
+  events: 0xf0e7,      // bolt
+  containers: 0xf1b2,  // cube
+  outposts: 0xf233,    // server
+  settings: 0xf013,    // cog
+  gatekeeper: 0xf023,  // lock
+  projects: 0xf07b,    // folder
+};
+
+/** Render a nav glyph by name: a Nerd Font glyph where mapped, else the line-style SVG. */
 export function Icon({ name, size = 17 }: { name: IconName; size?: number }) {
+  const cp = NERD[name];
+  if (cp !== undefined) {
+    return (
+      <span className="nf" aria-hidden="true"
+        style={{ fontSize: Math.round(size * 1.05), width: size + 3, flexShrink: 0 }}>
+        {String.fromCodePoint(cp)}
+      </span>
+    );
+  }
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true">
+      aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
       {PATHS[name]}
     </svg>
   );

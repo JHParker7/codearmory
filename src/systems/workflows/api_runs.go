@@ -124,6 +124,11 @@ func revokeRunToken(ctx context.Context, sessionID string) {
 type triggerRunRequest struct {
 	// Inputs are extra env vars injected into every step. Step-level env takes precedence.
 	Inputs map[string]string `json:"inputs"`
+	// Project, when set, attributes the run to the TRIGGERING project rather than the
+	// pipeline's own project — so a child running an INHERITED pipeline sees the run
+	// under its own project (runs are own-project scoped; see the project hierarchy).
+	// Honoured only when the caller may trigger runs in that project; otherwise ignored.
+	Project string `json:"project"`
 }
 
 // applyDeclaredInputs merges the trigger's provided inputs over the pipeline's
@@ -140,13 +145,19 @@ func applyDeclaredInputs(defs []WorkflowInputDef, provided map[string]string) (m
 		if _, ok := out[d.Name]; ok {
 			continue
 		}
-		if d.Default != "" {
-			out[d.Name] = d.Default
-			continue
-		}
-		if d.Required {
+		if d.Required && d.Default == "" {
 			return nil, "missing required input: " + d.Name
 		}
+		// Materialise EVERY declared input the caller omitted — including one whose
+		// default is the empty string — so a step template referencing ${inputs.<name>}
+		// resolves to "" instead of failing the run ~22ms pre-forge with "no run input
+		// named X". Measured on the git-broker publish/clone blocker: the clone step
+		// reads an optional `ref`, and a freshly-created pipeline triggered without ref
+		// died here at template resolution; `build` only ever survived because its
+		// callers always passed ref explicitly. Skipping empty defaults made a declared
+		// optional input indistinguishable from an undeclared one — the exact case the
+		// "declare it in the pipeline's inputs" error tells the user to fix.
+		out[d.Name] = d.Default
 	}
 	return out, ""
 }
@@ -200,20 +211,22 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 	}
 
 	run := WorkflowRun{
-		RunID:        uuid.New().String(),
-		WorkflowID:   wf.WorkflowID,
-		TriggeredBy:  userID,
-		OrgID:        orgID,
-		Project:      wf.Project,
-		Status:       StatusPending,
-		Inputs:       inputs,
-		Depth:        depth,
-		ParentRunID:  parentRunID,
-		Token:        encToken,
-		RunSessionID: sessionID,
-		RoleID:       wf.RoleID,
-		StepRuns:     []WorkflowStepRun{},
-		CreatedAt:    time.Now().UTC(),
+		RunID:            uuid.New().String(),
+		WorkflowID:       wf.WorkflowID,
+		TriggeredBy:      userID,
+		OrgID:            orgID,
+		Project:          wf.Project,
+		ProjectID:        wf.ProjectID,
+		ProjectNamespace: wf.ProjectNamespace,
+		Status:           StatusPending,
+		Inputs:           inputs,
+		Depth:            depth,
+		ParentRunID:      parentRunID,
+		Token:            encToken,
+		RunSessionID:     sessionID,
+		RoleID:           wf.RoleID,
+		StepRuns:         []WorkflowStepRun{},
+		CreatedAt:        time.Now().UTC(),
 	}
 	if err := run.Add(ctx); err != nil {
 		slog.ErrorContext(ctx, "trigger run: db error", "workflow_id", wf.WorkflowID, "user_id", userID, "error", err)
@@ -285,6 +298,40 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
+	// Attribute the run to the triggering project when asked (and permitted): a child
+	// running an INHERITED pipeline should see the run under ITS own project, not the
+	// pipeline's parent. authorizeWorkflow above already confirmed the caller may run
+	// this pipeline; here we additionally require they may trigger within the target
+	// project, then tag the run with it (a local wf copy, so only the run's project moves).
+	// PROJECT ISOLATION: the pipeline's OWN project bounds where a run may operate.
+	// A run may target (attribute to, and tag resources in) only the pipeline's project
+	// or a DESCENDANT of it — so a bootstrap parent's pipeline runs for its children,
+	// but a pipeline in an unrelated project cannot reach across the tree. Checked here,
+	// at the entry point, because the run then executes as the owner (who could touch
+	// anything) — the pipeline's project, not the owner's grants, is the boundary.
+	pipelineProject := wf.Project
+	bearer := r.Header.Get("Authorization")
+	if tp := strings.TrimSpace(req.Project); tp != "" && tp != wf.Project {
+		if !pipelineMayTargetProject(ctx, bearer, pipelineProject, tp) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "project isolation: a pipeline in project "+pipelineProject+" cannot run for project "+tp+" (outside its project subtree)", http.StatusForbidden)
+			return
+		}
+		if p := resolveProjectSlug(ctx, bearer, tp); p != nil &&
+			checkProjectPermission(ctx, bearer, "triggerRun", "pipelines", p.Slug, wf.WorkflowID) {
+			wf.Project = p.Slug
+			wf.ProjectID = p.ProjectID
+			wf.ProjectNamespace = p.Namespace
+		}
+	}
+	// The project a run tags its resources with (inputs.project) must also stay in the
+	// pipeline's subtree, or an ops pipeline could still create demo resources by input.
+	if ip := strings.TrimSpace(inputs["project"]); ip != "" && !pipelineMayTargetProject(ctx, bearer, pipelineProject, ip) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project isolation: a pipeline in project "+pipelineProject+" cannot create resources in project "+ip+" (outside its project subtree)", http.StatusForbidden)
 		return
 	}
 
@@ -384,6 +431,16 @@ func handleTriggerRunByBody(w http.ResponseWriter, r *http.Request) {
 	if msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
+	// PROJECT ISOLATION (sub-pipeline path): a sub-run may only tag resources in the
+	// sub-pipeline's own project or a descendant — so a parent orchestrator calling an
+	// inherited build pipeline for its child project (agentic-dev-flow → demo) is fine,
+	// but a pipeline in an unrelated project cannot be driven to create demo resources.
+	if ip := strings.TrimSpace(inputs["project"]); ip != "" && !pipelineMayTargetProject(ctx, r.Header.Get("Authorization"), wf.Project, ip) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "project isolation: a pipeline in project "+wf.Project+" cannot create resources in project "+ip+" (outside its project subtree)", http.StatusForbidden)
 		return
 	}
 

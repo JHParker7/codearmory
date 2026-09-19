@@ -251,7 +251,77 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	// forge-supplied and bypasses ALLOWED_IMAGES, so users never pick or maintain a
 	// git-capable image just to clone a repo into a shared volume.
 	isDefaultGitCheckout := !isBuild && !isCopy && !isResolve && !isArtifact && req.Checkout != nil && req.Image == ""
+	// A leased execution runs inside a sandbox the caller already holds. The lease is
+	// loaded in the switch below and its settings are inherited from here on, so
+	// `leased` carries it to the backend snapshot further down.
+	isLeased := req.LeaseID != ""
+	var leased Lease
 	switch {
+	case isLeased:
+		if isBuild || isCopy || isResolve || isArtifact {
+			http.Error(w, "lease_id cannot be combined with build, copy, resolve or artifact: those derive their own image and sandbox", http.StatusBadRequest)
+			return
+		}
+		// A lease clones once, at boot. Honouring a per-command checkout would clone
+		// again into the same working directory every command — the exact cost a lease
+		// exists to remove — so it is refused rather than silently obeyed.
+		if req.Checkout != nil {
+			http.Error(w, "checkout is not supported on a leased execution: the lease already cloned the repo when it started", http.StatusBadRequest)
+			return
+		}
+		// See the note on Lease.SecretRefs: a container's environment is fixed at
+		// start, so the only way to honour these would be to put resolved credentials
+		// in the command's argv, where anything else in the sandbox can read them.
+		if len(req.SecretRefs) > 0 {
+			http.Error(w, "secret_refs are not supported on a leased execution: set them on the lease, which resolves them into the sandbox environment at boot", http.StatusBadRequest)
+			return
+		}
+		if len(req.Volumes) > 0 {
+			http.Error(w, "volumes are not supported on a leased execution: they are attached to the lease when its sandbox starts", http.StatusBadRequest)
+			return
+		}
+		if req.Image != "" || req.RunnerClass != "" {
+			http.Error(w, "image and runner_class are not supported on a leased execution: they are fixed by the lease", http.StatusBadRequest)
+			return
+		}
+		if req.Run != "" && len(req.Command) == 0 {
+			req.Command = []string{"sh", "-c", req.Run}
+		}
+		if len(req.Command) == 0 {
+			http.Error(w, "run or command is required", http.StatusBadRequest)
+			return
+		}
+		var lerr error
+		leased, lerr = getLease(ctx, req.LeaseID)
+		if errors.Is(lerr, gorm.ErrRecordNotFound) {
+			http.Error(w, "lease not found", http.StatusNotFound)
+			return
+		}
+		if lerr != nil {
+			slog.ErrorContext(ctx, "submit: lease lookup", "lease_id", req.LeaseID, "error", lerr)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if leased.UserID != userID {
+			// 404 rather than 403, so a lease id cannot be probed for existence.
+			http.Error(w, "lease not found", http.StatusNotFound)
+			return
+		}
+		if leased.Status != leaseReady {
+			// Refused rather than queued: a caller that skipped the readiness poll
+			// should learn that now, not by having a command hang behind a boot that
+			// may never finish. The detail says which of the two it is.
+			http.Error(w, fmt.Sprintf("lease is %s, not ready", leased.Status), http.StatusConflict)
+			return
+		}
+		// Inherit the sandbox's identity so the stored execution describes where the
+		// command actually ran, not a sandbox that was never created.
+		req.Image = leased.Image
+		req.RunnerClass = leased.RunnerClass
+		req.Volumes = leased.Volumes
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
 	case isBuild:
 		if err := validateBuild(req.Build, req.SecretRefs, req.Env); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -399,6 +469,13 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if backend == "" {
 		backend = "default"
 	}
+	// A leased command runs in a sandbox that already exists on the backend the lease
+	// was created against. Re-deriving it from the runner class would send the exec at
+	// a different runtime if the class had been re-pointed since, where the sandbox
+	// simply is not.
+	if isLeased {
+		backend = leased.Backend
+	}
 
 	// Materialise an image build: it requires a privileged runner class (root +
 	// writable rootfs), which forge only honours on a kernel-isolated backend (kata or
@@ -440,6 +517,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		Build:       req.Build,
 		Copy:        req.Copy,
 		Resolve:     req.Resolve,
+		LeaseID:     req.LeaseID,
 		Status:      StatusPending,
 	}
 

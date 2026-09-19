@@ -190,6 +190,57 @@ func notifyPullEvent(ctx context.Context, re Repo, evType string, pr PullRequest
 	go emitEvent(emitCtx, ev, re.ID)
 }
 
+// pullRequestEvent is the type prefix for a PR lifecycle event; the action
+// (opened|closed|merged) completes it — `repo.pull_request.opened`, the same shape
+// the events service already understands from its Gitea/GitHub webhook adapters, so
+// a trigger can run a pipeline (CI, review) from a native git-factory PR.
+const pullRequestEvent = "repo.pull_request."
+
+// notifyPullRequest emits a PR lifecycle event. head is the source ref's tip commit
+// (the checks run on it); it may be empty if the branch could not be resolved.
+//
+// The event tenant (Actor.UserID) selects whose triggers are evaluated. For opened/
+// closed it stays the repo OWNER — a repo's CI/review triggers belong to whoever owns
+// it, exactly as notifyPush reasons — by passing actorID "". For a MERGE, the caller
+// passes the MERGER's id: a merge is an action a person takes, and their automation
+// should be able to react even on a repo they don't own (e.g. a human merging a
+// bot-owned <project>-wiki plan PR to start the build phase). Owner-owned repos are
+// unaffected — there the merger is the owner.
+func notifyPullRequest(ctx context.Context, re Repo, action string, pr PullRequest, head, actorID string) {
+	if !eventsEnabled() {
+		return
+	}
+	if actorID == "" {
+		actorID = re.Owner
+	}
+	fields := map[string]any{
+		"repo_id":    re.ID,
+		"repo":       re.Namespace + "/" + re.Name,
+		"namespace":  re.Namespace,
+		"name":       re.Name,
+		"clone_url":  re.HttpUrl,
+		"number":     strconv.Itoa(pr.Number),
+		"title":      pr.Title,
+		"author":     pr.Author,
+		"ref":        pr.SourceRef, // the source branch — what a review/CI checks out
+		"target_ref": pr.TargetRef,
+		"state":      pr.State,
+		"action":     action,
+	}
+	if head != "" {
+		fields["sha"] = head
+	}
+	ev := sdkevents.Event{
+		Type:    pullRequestEvent + action,
+		Source:  gitEventSource,
+		Subject: re.Namespace + "/" + re.Name,
+		Actor:   sdkevents.Actor{UserID: actorID},
+		Data:    fields,
+	}
+	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	go emitEvent(emitCtx, ev, re.ID)
+}
+
 func emitEvent(ctx context.Context, ev sdkevents.Event, repoID string) {
 	ctx, span := otel.Tracer(serviceName).Start(ctx, "notifyEvents")
 	defer span.End()

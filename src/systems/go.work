@@ -17,5 +17,6 @@ use (
 	./registry
 	./sdk
 	./tickets
+	./wiki
 	./workflows
 )

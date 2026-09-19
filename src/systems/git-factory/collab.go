@@ -51,28 +51,8 @@ type RepoShare struct {
 // manifest but missing here is grantable to the OWNER and to nobody else, which shows
 // up as a collaborator getting 404s on a repo they can otherwise use.
 var shareActions = map[string][]string{
-	"read": {
-		"getRepo", "listCommit", "getReadme", "listBranch", "listTag",
-		"getTree", "getBlob", "getArchive", "readRepo",
-		"listPull", "getPull", "createPull",
-		// Review and discussion: see above.
-		"reviewPull", "commentPull",
-		// Check results are part of reading a pull request — a reviewer has to be able
-		// to see whether CI passed.
-		"listStatus",
-		// Forking needs only the right to read the source; the copy lands in the
-		// forker's own namespace under their own createRepo grant.
-		"forkRepo",
-	},
-	"write": {
-		"getRepo", "listCommit", "getReadme", "listBranch", "listTag",
-		"getTree", "getBlob", "getArchive", "readRepo", "writeRepo", "updateRepo",
-		"setDefaultBranch",
-		"listPull", "getPull", "createPull", "mergePull", "updatePull",
-		"reviewPull", "commentPull", "listStatus", "forkRepo",
-		// Writers land releases and report build results.
-		"createTag", "deleteTag", "setStatus",
-	},
+	"read":  {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "listPull", "getPull", "createPull", "listPullComment", "createPullComment", "listReview", "createReview", "listStatus"},
+	"write": {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "writeRepo", "updateRepo", "setDefaultBranch", "listPull", "getPull", "createPull", "mergePull", "updatePull", "listPullComment", "createPullComment", "updatePullComment", "deletePullComment", "listReview", "createReview", "listStatus", "createStatus"},
 }
 
 func validShareLevel(l string) bool { _, ok := shareActions[l]; return ok }

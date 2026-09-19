@@ -17,6 +17,7 @@ src/systems/git/git
 src/systems/git-factory/git-factory
 src/systems/hooks/hooks
 src/systems/outpost/outpost
+src/systems/notifications/notifications
 src/systems/outpost-gateway/outpost-gateway
 src/systems/portal-bff/portal-bff
 src/systems/registry/registry

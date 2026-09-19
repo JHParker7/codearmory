@@ -28,8 +28,8 @@ func TestComplete_StatusVariants(t *testing.T) {
 	requireDB(t)
 	for _, status := range []string{StatusFailed, StatusCancelled, StatusCompleted} {
 		run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: "w", TriggeredBy: "u", OrgID: "o", Status: "running", CreatedAt: time.Now().UTC()}
-		run.Add(context.Background())                                                                 //nolint:errcheck
-		connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)          //nolint:errcheck
+		run.Add(context.Background())                                                         //nolint:errcheck
+		connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID) //nolint:errcheck
 		rid := run.RunID
 		t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, rid) }) //nolint:errcheck
 		run.Status = "running"

@@ -13,8 +13,8 @@ import "testing"
 func TestStateMachineRoundTripsStepPermissions(t *testing.T) {
 	perms := []PermissionSpec{{Service: "builder", Action: "setOrgServiceImage", Resource: "codearmory/builder/orgs/default"}}
 	steps := []WorkflowStep{{
-		Step:        Step{Name: "retarget", Action: ActionHTTP, Permissions: perms},
-		}}
+		Step: Step{Name: "retarget", Action: ActionHTTP, Permissions: perms},
+	}}
 
 	doc := modelToSM("p", "", steps, nil, nil, nil, nil)
 	st, ok := doc.States["retarget"]

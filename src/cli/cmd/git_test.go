@@ -31,10 +31,10 @@ func TestGitCmd_Add_PostsAuthByMode(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, gitCmd, "add")
-	sub.Flags().Set("name", "gh")             //nolint:errcheck
-	sub.Flags().Set("type", "github")         //nolint:errcheck
-	sub.Flags().Set("auth-mode", "pat")       //nolint:errcheck
-	sub.Flags().Set("token", "ghp_secret")    //nolint:errcheck
+	sub.Flags().Set("name", "gh")          //nolint:errcheck
+	sub.Flags().Set("type", "github")      //nolint:errcheck
+	sub.Flags().Set("auth-mode", "pat")    //nolint:errcheck
+	sub.Flags().Set("token", "ghp_secret") //nolint:errcheck
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("git add: %v", err)
 	}

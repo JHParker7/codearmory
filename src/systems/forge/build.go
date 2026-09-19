@@ -178,7 +178,17 @@ func kanikoCommand(b *BuildSpec) []string {
 		sb.WriteString("mkdir -p /kaniko/.docker\n")
 		sb.WriteString("printf '%s' \"$" + orDefault(b.RegistryAuth, defaultRegistryAuthEnv) + "\" > /kaniko/.docker/config.json\n")
 	}
-	sb.WriteString("exec /kaniko/executor")
+	// Forward the egress proxy into RUN steps. The exec pod has HTTP(S)_PROXY/NO_PROXY
+	// injected (FORGE_EGRESS_PROXY) because the NetworkPolicy confines it to the proxy,
+	// but kaniko does NOT pass the executor's env to RUN — so `RUN npm ci` / `pip install`
+	// egress directly and are blocked. kaniko (like Docker) treats HTTP_PROXY, HTTPS_PROXY,
+	// NO_PROXY (and lowercase) as PREDEFINED proxy build-args: passed via --build-arg they
+	// reach RUN without a Dockerfile ARG and are not baked into the image. Pass through only
+	// the ones set; proxy URLs and the NO_PROXY list have no spaces, so the unquoted
+	// $PROXYARGS word-splits cleanly into separate flags.
+	sb.WriteString("PROXYARGS=''\n")
+	sb.WriteString(`for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do eval "pv=\${$v:-}"; [ -n "$pv" ] && PROXYARGS="$PROXYARGS --build-arg $v=$pv"; done` + "\n")
+	sb.WriteString("exec /kaniko/executor $PROXYARGS")
 	sb.WriteString(" --context=dir://" + shellSingleQuote(ctx))
 	sb.WriteString(" --dockerfile=" + shellSingleQuote(df))
 	// Pulling the base image is the step most exposed to someone else's rate limit,

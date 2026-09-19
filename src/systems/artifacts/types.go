@@ -34,6 +34,18 @@ type Artifact struct {
 	UserID string `json:"user_id" gorm:"column:user_id;index:idx_user_name,unique,priority:1"`
 	OrgID  string `json:"org_id,omitempty" gorm:"column:org_id;default:''"`
 	Name   string `json:"name" gorm:"column:name;index:idx_user_name,unique,priority:2"`
+	// Project is the workspace label. When it names a real gatekeeper Project the
+	// caller can reach, ProjectID/ProjectNamespace are set at upload and access widens
+	// to that project's members via a project role; otherwise it stays a free-text
+	// view-filter label and access stays governed by UserID. Empty ⇒ unfiled (the
+	// backward-compatible default). Mirrors forge's Execution project triple.
+	Project string `json:"project,omitempty" gorm:"column:project;default:''"`
+	// ProjectID/ProjectNamespace are set when Project resolves to a real gatekeeper
+	// Project (not just a free-text label): ProjectID lets list views widen to a
+	// project's members cheaply (indexed), ProjectNamespace is the owner namespace a
+	// member's project grant must be qualified with. Both empty ⇒ Project is a label.
+	ProjectID        string `json:"project_id,omitempty" gorm:"column:project_id;default:'';index"`
+	ProjectNamespace string `json:"project_namespace,omitempty" gorm:"column:project_namespace;default:''"`
 	// SizeBytes is the stored size, and the unit the quota is accounted in.
 	SizeBytes   int64  `json:"size_bytes" gorm:"column:size_bytes"`
 	ContentType string `json:"content_type,omitempty" gorm:"column:content_type;default:''"`
@@ -79,8 +91,8 @@ type QuotaView struct {
 	// Default reports whether MaxBytes came from the service default rather than an
 	// override, so an admin can tell "never configured" from "deliberately set to
 	// the same value".
-	Default    bool  `json:"default"`
-	UsedBytes  int64 `json:"used_bytes"`
-	Artifacts  int64 `json:"artifacts"`
-	SetBy      string `json:"set_by,omitempty"`
+	Default   bool   `json:"default"`
+	UsedBytes int64  `json:"used_bytes"`
+	Artifacts int64  `json:"artifacts"`
+	SetBy     string `json:"set_by,omitempty"`
 }

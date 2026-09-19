@@ -121,7 +121,7 @@ func (e *unresolvedError) Error() string {
 
 // workflowRefPrefixes are the namespaces that make a ${...} unambiguously a
 // workflow reference rather than some other system's syntax.
-var workflowRefPrefixes = []string{"steps.", "inputs.", "matrix.", "map.", "scatter."}
+var workflowRefPrefixes = []string{"steps.", "inputs.", "matrix.", "map.", "loop.", "scatter."}
 
 // looksLikeWorkflowRef reports whether expr is addressed to THIS engine, and is
 // therefore something we may fail a step over.
@@ -198,6 +198,9 @@ func (sc substContext) explain(expr string) string {
 	if key, ok := strings.CutPrefix(expr, "map."); ok {
 		return fmt.Sprintf("no map variable %q bound here — this step is not inside a map region, or its var has another name", key)
 	}
+	if key, ok := strings.CutPrefix(expr, "loop."); ok {
+		return fmt.Sprintf("no loop variable %q bound here — this step is not inside a loop, or the loop declares no var", key)
+	}
 	if key, ok := strings.CutPrefix(expr, "scatter."); ok {
 		if key == "path" {
 			return "this step is not a scatter leg, so it has no ${scatter.path}"
@@ -260,6 +263,16 @@ func (sc substContext) resolve(expr string) (string, bool) {
 			for _, v := range sc.mapVars {
 				return v, true
 			}
+		}
+		return "", false
+	}
+	// ${loop.<var>} resolves to this loop iteration's binding. A loop reuses the same
+	// per-iteration bindings a map region does (a step is in at most one), so this is
+	// an alias over the same namespace — kept distinct so a loop body reads ${loop.x}
+	// and a map body reads ${map.x}, each naming what it actually is.
+	if key, ok := strings.CutPrefix(expr, "loop."); ok {
+		if v, ok := sc.mapVars[key]; ok {
+			return v, true
 		}
 		return "", false
 	}

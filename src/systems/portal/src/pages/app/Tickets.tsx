@@ -102,10 +102,13 @@ function slugify(s: string): string {
  * changes. Both modes expose the full ticket detail set — title, description,
  * priority, status, timescale, due date, and assignee — to match the CLI form.
  */
-function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOptions, users, onSaved, onClose }: {
+function TicketFormModal({ mode, ticket, boardId, defaultProject, statuses, priorities, parentOptions, users, onSaved, onClose }: {
   mode: 'create' | 'edit';
   ticket?: Ticket;
   boardId?: string;
+  // The selected project's slug — a new ticket defaults to it so it lands in the
+  // scope that is currently being viewed (otherwise it is filtered out and "vanishes").
+  defaultProject?: string;
   statuses: TicketFieldDef[];
   priorities: TicketFieldDef[];
   // Candidate parent tickets (same board, excluding this ticket) for the parent picker.
@@ -133,8 +136,8 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
     dueDate: ticket?.due_date ? ticket.due_date.slice(0, 10) : '',
     assigneeId: ticket?.assignee_id ?? '',
     parent: ticket?.parent_id ?? '',
-    project: ticket?.project ?? '',
-  }), [ticket, ordered]);
+    project: ticket?.project ?? defaultProject ?? '',
+  }), [ticket, ordered, defaultProject]);
   // Read any saved draft once, on first render, and seed the fields from it. Only a
   // draft that actually differs from the saved values counts as one to restore.
   const seed = useRef<typeof baseline | null>(null);
@@ -324,6 +327,11 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
 /** Modal to create a new board (name + optional description/color). */
 function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
+  // A board belongs to the CURRENT project (the tickets service rejects a
+  // project-less board). The portal is already project-scoped, so tag the new
+  // board with the selected project's slug rather than showing a picker; if no
+  // project is selected ("all projects"), block create with a clear message.
+  const project = useAppSelector(s => s.project.current);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -331,10 +339,11 @@ function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; 
 
   const handleSubmit = async () => {
     if (!name.trim()) return;
+    if (!project) { setError('Select a project first — a board must belong to a project.'); return; }
     setSubmitting(true);
     setError(null);
     try {
-      onCreated(await createBoard(token, { name: name.trim(), description: description.trim() || undefined }));
+      onCreated(await createBoard(token, { name: name.trim(), description: description.trim() || undefined, project }));
     } catch (e: unknown) {
       setError((e as Error).message);
       setSubmitting(false);
@@ -360,9 +369,15 @@ function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; 
             <input value={description} onChange={e => setDescription(e.target.value)}
               style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' }} />
           </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>PROJECT</div>
+            <div style={{ fontFamily: T.mono, fontSize: 12, color: project ? T.text : T.red, background: T.cardHi, border: `1px solid ${T.border}`, padding: '8px 10px' }}>
+              {project || 'none selected — pick a project in the switcher first'}
+            </div>
+          </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={handleSubmit} disabled={!name.trim() || submitting}
-              style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!name.trim() || submitting) ? 0.6 : 1 }}>
+            <button onClick={handleSubmit} disabled={!name.trim() || submitting || !project}
+              style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!name.trim() || submitting || !project) ? 0.6 : 1 }}>
               {submitting ? '[ · · · ]' : '[ create board ]'}
             </button>
             <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '9px 14px', cursor: 'pointer' }}>cancel</button>
@@ -454,6 +469,10 @@ function ColumnsModal({ statuses, boardId, boardName, onChanged, onClose }: { st
 /** Ticket kanban: first-class board switcher + status columns with drag-to-move, a detail drawer, and column config. */
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
+  // The selected project scopes the board to that project's tickets (null = all).
+  // Scope is EXACT-PROJECT: the selected project shows only its OWN boards/tickets, never
+  // a parent's or child's. Fetch unscoped and filter to the current slug.
+  const project = useAppSelector(s => s.project.current);
   const users = useUsers(token);
   // Derive the id→username map from the same catalog the assignee picker uses, to avoid a second fetch.
   const userNames = useMemo(() => Object.fromEntries(users.map(u => [u.user_id, u.username])), [users]);
@@ -532,14 +551,18 @@ export function Tickets() {
         listTickets(token),
         listBoards(token).catch(() => [] as Board[]),
       ]);
-      setTickets(tk);
-      setBoards(bd);
+      const inScope = (p?: string) => (project ? p === project : true);
+      setTickets(tk.filter(t => inScope(t.project)));
+      // A projectless board is the shared "Default" that CLI/agent-created tickets land
+      // on; keep it visible in every project view (its cards are still project-filtered
+      // via `tickets` + board_id), otherwise a project's tickets have no board to render under.
+      setBoards(bd.filter(b => !b.project || inScope(b.project)));
     } catch (e: unknown) {
       if (!silent) setError((e as Error).message);
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [token]);
+  }, [token, project]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -581,10 +604,16 @@ export function Tickets() {
 
   // Open/total for a board: prefer the server-computed counts (accurate beyond the
   // ticket-list page cap), falling back to the loaded tickets.
-  const boardCounts = useCallback((b: Board) => ({
-    open: b.open_count ?? tickets.filter(t => t.board_id === b.board_id && !isTerminal(t.status)).length,
-    total: b.total_count ?? tickets.filter(t => t.board_id === b.board_id).length,
-  }), [tickets]);
+  const boardCounts = useCallback((b: Board) => {
+    const local = {
+      open: tickets.filter(t => t.board_id === b.board_id && !isTerminal(t.status)).length,
+      total: tickets.filter(t => t.board_id === b.board_id).length,
+    };
+    // A projectless (shared) board's server counts span ALL projects; the local tally
+    // is already project-scoped, so use it to keep the badge honest (49, not 100).
+    if (!b.project) return local;
+    return { open: b.open_count ?? local.open, total: b.total_count ?? local.total };
+  }, [tickets]);
 
   const visibleTickets = useMemo(() => tickets.filter(t => t.board_id === board), [tickets, board]);
 
@@ -963,6 +992,7 @@ export function Tickets() {
         <TicketFormModal
           mode="create"
           boardId={createBoardId}
+          defaultProject={project ?? ''}
           statuses={statuses}
           priorities={priorities}
           parentOptions={visibleTickets}

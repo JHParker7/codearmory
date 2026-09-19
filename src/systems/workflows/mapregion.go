@@ -258,9 +258,9 @@ func iterVolume(base string, regionKey, i int) string {
 // BOTH ends are inside it. Routes crossing the boundary are the region's inbound and
 // outbound edges — the scheduler resolves those against the region as a whole, so an
 // iteration must not see them.
-func (g *workflowGraph) subGraph(region *mapRegion) *workflowGraph {
-	inside := make(map[string]bool, len(region.nodes))
-	for _, n := range region.nodes {
+func (g *workflowGraph) subGraph(nodes []string) *workflowGraph {
+	inside := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
 		inside[n] = true
 	}
 	var steps []WorkflowStep
@@ -276,9 +276,17 @@ func (g *workflowGraph) subGraph(region *mapRegion) *workflowGraph {
 		}
 	}
 	sub := newGraph(steps, routes)
-	// Keep the workflow-level step indices: an iteration's step runs must still name
-	// the step they came from, not a position within the region.
-	sub.outerIndex = g.index
+	// Keep the WORKFLOW-level step indices through ARBITRARY nesting: an iteration's
+	// step runs must still name the step they came from, not a position within the
+	// region. Use g's REPORTED index (g.stepIndex resolves g.outerIndex when g is
+	// itself a sub, else g.index) — plain g.index would, for a loop nested inside a
+	// loop, report the inner loop's steps at their position within the PARENT sub-graph
+	// (e.g. spec at 1 instead of 4), so the run view maps them to the wrong step: the
+	// inner-loop step shows pending while its run is attributed to some other node.
+	sub.outerIndex = make(map[string]int, len(steps))
+	for _, ws := range steps {
+		sub.outerIndex[ws.Name] = g.stepIndex(ws.Name)
+	}
 	return sub
 }
 
@@ -303,12 +311,24 @@ func (p *WorkerPool) runMapRegion(
 		// allow_empty, "no items" is a legitimate outcome — record the region as a
 		// completed no-op (kept visible in the run view) and let the run stay green.
 		if region.def.AllowEmpty {
-			return map[string]string{}, p.mapSkip(runID, g, region, fmt.Sprintf("map %q produced no values — skipped (allow_empty)", region.def.ID)), 0
+			// Bind each region node's aggregate output to an empty JSON array, the same
+			// [] shape the populated path publishes (just empty), so a downstream
+			// ${steps.<node>.output} RESOLVES to [] rather than being left unbound.
+			// Without this a skipped map leaves the node's output absent, and a consumer
+			// — e.g. pr-review's report step reads ${steps.fix.output} to build its
+			// "Fixed?" column — hard-fails with "is not an ancestor" on any zero-findings
+			// PR (measured on pr-review run a3493b6e: extract found 0 findings, fixmap
+			// skipped, report died on the unresolved ref).
+			empty := make(map[string]string, len(region.nodes))
+			for _, n := range region.nodes {
+				empty[n] = "[]"
+			}
+			return empty, p.mapSkip(runID, g, region, fmt.Sprintf("map %q produced no values — skipped (allow_empty)", region.def.ID)), 0
 		}
 		return nil, p.mapFail(runID, g, region, fmt.Sprintf("map %q produced no values to run", region.def.ID)), 0
 	}
 
-	sub := g.subGraph(region)
+	sub := g.subGraph(region.nodes)
 	// Built once for the whole region, not per iteration: it is the same set for every
 	// value, and a wide fan-out would otherwise rebuild an identical map N times.
 	known := g.stepNames()

@@ -139,7 +139,7 @@ func TestResolveVolumeMounts(t *testing.T) {
 		{WorkflowID: "run-1", Name: "repo", MountPath: "/src", Workdir: true},
 		{WorkflowID: "run-1", Name: "cache"}, // default path
 	}}
-	got := resolveVolumeMounts(exec)
+	got := resolveVolumeMounts(exec.Volumes)
 	if len(got) != 2 {
 		t.Fatalf("want 2 mounts, got %d", len(got))
 	}

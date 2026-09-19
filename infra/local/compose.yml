@@ -71,7 +71,7 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,events=events-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,git_connector=git-local-secret,codearmory_git_factory=git-factory-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,events=events-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,git_connector=git-local-secret,codearmory_git_factory=git-factory-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret,wiki=wiki-local-secret
       SECRETS_LOOKUP_ALLOWED_CALLERS: "forge,containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
@@ -369,6 +369,33 @@ services:
         condition: service_healthy
       gatekeeper:
         condition: service_healthy
+      registry:
+        condition: service_started
+    restart: on-failure
+
+  wiki:
+    build:
+      context: ../../src/systems
+      dockerfile: wiki/Dockerfile
+    environment:
+      <<: *otel-env
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the wiki entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: wiki-local-secret
+      # Content storage: git via git-factory (model B — the wiki acts as its own bot).
+      GIT_FACTORY_URL: http://git-factory:9002
+      # The wiki logs in as this bot to write project wikis (model B). Provision the bot
+      # once, then set WIKI_BOT_PASSWORD in your local env.
+      WIKI_BOT_EMAIL: ${WIKI_BOT_EMAIL:-wiki-bot@codearmory.local}
+      WIKI_BOT_PASSWORD: ${WIKI_BOT_PASSWORD:-}
+      WIKI_NAMESPACE: ${WIKI_NAMESPACE:-codearmory-wiki-bot}
+    ports:
+      - "8110:8110"
+    depends_on:
+      gatekeeper:
+        condition: service_healthy
+      git-factory:
+        condition: service_started
       registry:
         condition: service_started
     restart: on-failure

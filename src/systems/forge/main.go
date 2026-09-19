@@ -212,6 +212,15 @@ func main() {
 		slog.Error("failed to migrate volumes", "error", err)
 		os.Exit(1)
 	}
+	if err := connect().AutoMigrate(&Lease{}); err != nil {
+		slog.Error("failed to migrate leases", "error", err)
+		os.Exit(1)
+	}
+	// Backs the per-user quota count and the reaper's active-lease sweep, both of
+	// which run on every create and every tick.
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS leases_active ON leases (user_id) WHERE status IN ('starting', 'ready')`).Error; err != nil {
+		slog.Warn("failed to create leases active index", "error", err)
+	}
 	slog.Info("database initialized")
 
 	// The registry builds runtimes lazily per backend. Eagerly resolve the
@@ -228,6 +237,7 @@ func main() {
 	initVolumeConfig()
 	initBuildConfig()
 	initCheckoutConfig()
+	initLeaseConfig()
 	initConcurrencyConfig()
 
 	// Percent-based admission budget: if configured, derive the CPU/memory budget from
@@ -263,6 +273,11 @@ func main() {
 	// holding cluster budget in the scheduler and wedges the queue for everyone.
 	go startExecutionReaper(ctx, reg)
 
+	// Stop leases past their idle or lifetime deadline and collect sandboxes with no
+	// lease row behind them. A held sandbox is reserved memory, so a caller that
+	// crashed mid-lease would otherwise cost a runner class until forge restarted.
+	go startLeaseReaper(ctx, reg)
+
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
@@ -276,6 +291,10 @@ func main() {
 	mux.HandleFunc("GET /runner-classes/{name}", handleGetRunnerClass)
 	mux.HandleFunc("PUT /runner-classes/{name}", handleUpdateRunnerClass)
 	mux.HandleFunc("DELETE /runner-classes/{name}", handleDeleteRunnerClass)
+	mux.HandleFunc("POST /leases", handleCreateLease(reg))
+	mux.HandleFunc("GET /leases", handleListLeases)
+	mux.HandleFunc("GET /leases/{id}", handleGetLease)
+	mux.HandleFunc("DELETE /leases/{id}", handleReleaseLease(reg))
 	mux.HandleFunc("POST /volumes", handleCreateVolume(reg))
 	mux.HandleFunc("GET /volumes", handleListVolumes)
 	mux.HandleFunc("GET /volumes/{id}", handleGetVolume(reg))

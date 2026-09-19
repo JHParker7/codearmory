@@ -32,7 +32,12 @@ import (
 // Resource limits are determined per-execution by the runner class stored in the
 // database.
 type KubernetesRuntime struct {
-	client       kubernetes.Interface
+	client kubernetes.Interface
+	// restConfig is retained solely for pods/exec, which needs to build its own
+	// SPDY/WebSocket transport rather than going through the typed clientset. It is
+	// nil in tests that construct the runtime directly with a fake clientset, so the
+	// lease exec path must nil-check it and report a clear error instead of panicking.
+	restConfig   *rest.Config
 	namespace    string
 	runtimeClass *string
 	// egressProxy is the HTTP proxy URL (FORGE_EGRESS_PROXY, e.g.
@@ -136,6 +141,7 @@ func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*Kube
 
 	rt := &KubernetesRuntime{
 		client:           client,
+		restConfig:       cfg,
 		namespace:        envOrDefault("K8S_NAMESPACE", "forge"),
 		runtimeClass:     resolveRuntimeClass(configRuntimeClass),
 		kernelIsolated:   kernelIsolated,
@@ -405,7 +411,7 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 		},
 	}}
 	workingDir := ""
-	for i, rm := range resolveVolumeMounts(exec) {
+	for i, rm := range resolveVolumeMounts(exec.Volumes) {
 		volName := fmt.Sprintf("ws-%d", i)
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: volName, MountPath: rm.mountPath, ReadOnly: rm.readOnly})
 		volumes = append(volumes, corev1.Volume{

@@ -36,9 +36,9 @@ func TestInitHTTPClient_TLS(t *testing.T) {
 	keyPath := filepath.Join(dir, "key.pem")
 	caPath := filepath.Join(dir, "ca.pem")
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	os.WriteFile(certPath, certPEM, 0o600)                                                       //nolint:errcheck
+	os.WriteFile(certPath, certPEM, 0o600)                                                              //nolint:errcheck
 	os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600) //nolint:errcheck
-	os.WriteFile(caPath, certPEM, 0o600)                                                         //nolint:errcheck
+	os.WriteFile(caPath, certPEM, 0o600)                                                                //nolint:errcheck
 
 	t.Setenv("TLS_CLIENT_CERT_FILE", certPath)
 	t.Setenv("TLS_CLIENT_KEY_FILE", keyPath)

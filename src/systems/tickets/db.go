@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -87,15 +88,88 @@ func (t Ticket) Add(ctx context.Context) error {
 	return nil
 }
 
+// ErrVersionConflict is returned when a conditional update's If-Match version
+// does not match the row. It means another writer got there first, which the
+// handler surfaces as 412 Precondition Failed.
+var ErrVersionConflict = errors.New("ticket version conflict")
+
+// mutableTicketAssignments is the set of columns a PUT may change, with the
+// values to write. Enumerated explicitly rather than handed to Save() so that
+// zero values (clearing a description, unassigning) are written rather than
+// skipped, and so the immutable columns — ticket_id, created_by, org_id,
+// namespace, created_at — cannot be moved by an update path.
+//
+// version is incremented BY THE DATABASE rather than by the caller. If the
+// process computed version+1 from a value it had read, two concurrent
+// unconditional writers would both compute the same number, and a later
+// If-Match holding it would match the wrong write.
+func (t Ticket) mutableTicketAssignments() map[string]any {
+	return map[string]any{
+		"title":              t.Title,
+		"description":        t.Description,
+		"status":             t.Status,
+		"priority":           t.Priority,
+		"timescale":          t.Timescale,
+		"due_date":           t.DueDate,
+		"project":            t.Project,
+		"board_id":           t.BoardID,
+		"parent_id":          t.ParentID,
+		"assignee_id":        t.AssigneeID,
+		"workflow_id":        t.WorkflowID,
+		"run_id":             t.RunID,
+		"forge_execution_id": t.ForgeExecutionID,
+		"updated_at":         time.Now().UTC(),
+		"version":            gorm.Expr("version + 1"),
+	}
+}
+
+// Update writes the ticket unconditionally — last-write-wins, the behaviour
+// every existing caller relies on. The version still advances, so a client using
+// If-Match detects this write too.
 func (t Ticket) Update(ctx context.Context) error {
 	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket.update")
 	defer span.End()
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
-	t.UpdatedAt = time.Now().UTC()
-	if err := connect().WithContext(ctx).Save(&t).Error; err != nil {
+	if err := connect().WithContext(ctx).Model(&Ticket{}).
+		Where("ticket_id = ? AND active = ?", t.TicketID, true).
+		Updates(t.mutableTicketAssignments()).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// UpdateIfVersion writes the ticket only if its stored version still equals
+// expected, returning ErrVersionConflict otherwise.
+//
+// The comparison and the write are ONE statement — the version is in the WHERE
+// clause of the UPDATE — so there is no window between checking and writing. A
+// read-then-write in application code would reintroduce exactly the race this
+// exists to close.
+func (t Ticket) UpdateIfVersion(ctx context.Context, expected int64) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket.update_if_version")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("ticket.id", t.TicketID),
+		attribute.Int64("ticket.expected_version", expected),
+	)
+
+	res := connect().WithContext(ctx).Model(&Ticket{}).
+		Where("ticket_id = ? AND active = ? AND version = ?", t.TicketID, true, expected).
+		Updates(t.mutableTicketAssignments())
+	if res.Error != nil {
+		span.RecordError(res.Error)
+		span.SetStatus(codes.Error, res.Error.Error())
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Either the version moved or the row is gone. The caller has already
+		// loaded and authorised the ticket, so a conflict is by far the likelier
+		// of the two and the more useful thing to report.
+		span.SetStatus(codes.Ok, "")
+		return ErrVersionConflict
 	}
 	span.SetStatus(codes.Ok, "")
 	return nil
@@ -913,6 +987,148 @@ func seedDefaultFieldDefs(ctx context.Context) error {
 		if err := connect().WithContext(ctx).Create(&e.defaults).Error; err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ── TicketDependency ──────────────────────────────────────────────────────────
+
+func (d TicketDependency) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket_dependency.add")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("ticket.id", d.TicketID),
+		attribute.String("depends_on.id", d.DependsOnID),
+	)
+	// Declaring the same dependency twice is a no-op rather than an error: the
+	// caller's intent ("this must wait for that") is already true, and making it
+	// a conflict would force every client to read before writing.
+	if err := connect().WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&d).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (d TicketDependency) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.ticket_dependency.remove")
+	defer span.End()
+	// A hard delete, not the soft `active` flag the other entities use: a
+	// dependency that no longer applies is not history worth keeping, and a
+	// soft-deleted row would still have to be excluded from every readiness
+	// check — one more place to get it wrong.
+	if err := connect().WithContext(ctx).
+		Where("ticket_id=? AND depends_on_id=?", d.TicketID, d.DependsOnID).
+		Delete(&TicketDependency{}).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// removeDependenciesOf clears every dependency edge touching a ticket, in either
+// direction. Called when a ticket is deleted, so nothing is left blocked forever
+// by something that no longer exists.
+func removeDependenciesOf(ctx context.Context, ticketID string) error {
+	return connect().WithContext(ctx).
+		Where("ticket_id=? OR depends_on_id=?", ticketID, ticketID).
+		Delete(&TicketDependency{}).Error
+}
+
+// dependencyIDs returns the ids a ticket depends on, oldest edge first.
+func dependencyIDs(ctx context.Context, ticketID string) ([]string, error) {
+	var rows []TicketDependency
+	if err := connectRead().WithContext(ctx).
+		Where("ticket_id=?", ticketID).
+		Order("created_at").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.DependsOnID)
+	}
+	return out, nil
+}
+
+// loadDependencies fills DependsOn for a batch of tickets.
+//
+// UNLIKE COMMENTS, this runs for listings too. Comments are blanked there
+// (db.go, listTickets) because a hundred tickets' comment histories are large
+// and rarely all wanted. Dependencies are the opposite on both counts: a handful
+// of ids and statuses per ticket, and the whole reason to ask for a listing is
+// often to decide which of those tickets can be worked NOW. Omitting them would
+// force a consumer to fetch every ticket individually to answer that — the N+1
+// this shape exists to avoid, and a trap that has already cost one agent runtime
+// a day of debugging when it judged eligibility from a listing whose comments
+// were empty.
+//
+// Two queries regardless of batch size: one for the edges, one for the blockers.
+func loadDependencies(ctx context.Context, tickets []Ticket, userID, orgID string) error {
+	if len(tickets) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(tickets))
+	for _, t := range tickets {
+		ids = append(ids, t.TicketID)
+	}
+
+	var edges []TicketDependency
+	if err := connectRead().WithContext(ctx).
+		Where("ticket_id IN ?", ids).
+		Order("created_at").
+		Find(&edges).Error; err != nil {
+		return err
+	}
+	for i := range tickets {
+		tickets[i].DependsOn = []TicketDependencyView{}
+	}
+	if len(edges) == 0 {
+		return nil
+	}
+
+	blockerIDs := make([]string, 0, len(edges))
+	seen := map[string]bool{}
+	for _, e := range edges {
+		if !seen[e.DependsOnID] {
+			seen[e.DependsOnID] = true
+			blockerIDs = append(blockerIDs, e.DependsOnID)
+		}
+	}
+	var blockers []Ticket
+	if err := connectRead().WithContext(ctx).
+		Where("ticket_id IN ? AND active = ?", blockerIDs, true).
+		Find(&blockers).Error; err != nil {
+		return err
+	}
+	byID := make(map[string]Ticket, len(blockers))
+	for _, b := range blockers {
+		byID[b.TicketID] = b
+	}
+
+	index := make(map[string]int, len(tickets))
+	for i, t := range tickets {
+		index[t.TicketID] = i
+	}
+	for _, e := range edges {
+		i, ok := index[e.TicketID]
+		if !ok {
+			continue
+		}
+		view := TicketDependencyView{TicketID: e.DependsOnID}
+		// A blocker the caller cannot see is reported as a bare id: they still
+		// need to know the work is blocked, and must not learn what by.
+		if b, ok := byID[e.DependsOnID]; ok && canAccessTicket(b, userID, orgID) {
+			view.Title = b.Title
+			view.Status = b.Status
+		}
+		tickets[i].DependsOn = append(tickets[i].DependsOn, view)
 	}
 	return nil
 }

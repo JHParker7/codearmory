@@ -167,6 +167,15 @@ spec:
             - name: GIT_STORAGE_PREFLIGHT
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.gitFactory.env.automationUsers }}
+            # Comma-separated user ids allowed as a createPull `author` override, so a
+            # workflow opening a PR with its own per-run repo credential can attribute it
+            # to a bot display account (e.g. codearmory-bot) without that account holding
+            # any credential or grant. Attribution only — the real caller is still
+            # authorised and recorded in OpenedByUserID. Empty disables the override.
+            - name: GIT_FACTORY_AUTOMATION_USERS
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.events.enabled }}
             # Push events are posted here (POST /internal/events), signed with
             # EVENTS_TRIGGER_KEY below. Unset when events is disabled, which simply turns
