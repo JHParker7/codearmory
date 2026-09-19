@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// instanceUserCount returns the total number of user accounts on the instance,
+// instanceUserCount returns the number of REAL user accounts on the instance,
 // regardless of active status. It is the single source of truth for "has this
 // instance been bootstrapped": both the public setup-status endpoint and the
 // bootstrap-admin determination use it, so deactivating every user can never reset
@@ -16,13 +16,33 @@ import (
 // signup). It deliberately counts inactive accounts — only a full account wipe
 // resets it. The caller passes the db handle so the bootstrap path can count inside
 // its transaction (read-your-writes) while the public endpoint uses the primary.
+//
+// Platform-seeded accounts are EXCLUDED, and that exclusion is load-bearing rather
+// than tidy. seedPlatformAccount writes the `codearmory` row on every startup, before
+// any human can sign up. Counting it meant the count was never 0, so
+// `grantedAdmin = count == 0` never fired and NO signup could ever become the bootstrap
+// admin — on an instance with no env-var admin configured, that left it permanently
+// adminless, with the only wildcard-holding account being one that can never log in.
+// The same row also made /setup/status report `initialized: true` on a brand-new
+// instance, so the setup flow was skipped before anyone had an account.
+//
+// Excluded BY ID, not by username: platformUserID is a fixed constant this service
+// owns, whereas a username is mutable and — if a reserved name ever reached a row —
+// filtering on it would let that row hide from the count and re-open the first-user
+// admin grant. isPlatformAccount checks by id for the same reason. Keep this list in
+// step with what the startup seeders create.
 func instanceUserCount(db *gorm.DB) (int64, error) {
 	var count int64
-	if err := db.Model(&User{}).Count(&count).Error; err != nil {
+	if err := db.Model(&User{}).
+		Where("user_id NOT IN ?", seededAccountIDs).Count(&count).Error; err != nil {
 		return 0, err
 	}
 	return count, nil
 }
+
+// seededAccountIDs are the accounts the platform creates for itself. They are not
+// people, so nothing that asks "does this instance have any users yet" should see them.
+var seededAccountIDs = []string{platformUserID}
 
 // ── Lookup helpers ────────────────────────────────────────────────────────────
 

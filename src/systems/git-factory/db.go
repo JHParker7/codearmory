@@ -69,6 +69,19 @@ func connect() *gorm.DB {
 	return gormDB
 }
 
+// dbReady reports whether a database handle already exists, WITHOUT opening one.
+//
+// It exists because connect/connectRead exit the process when they cannot reach the
+// database — correct at startup, fatal anywhere optional. Background fan-out (push and
+// pull-request notifications) must be able to ask "is there a database to read?" and do
+// nothing when the answer is no, rather than taking the process down from a goroutine.
+// In a running service this is always true: main connects and migrates before serving.
+func dbReady() bool {
+	dbInitMu.Lock()
+	defer dbInitMu.Unlock()
+	return gormDB != nil || gormDBRead != nil
+}
+
 // connectRead lazily opens a read connection, using DATABASE_READ_URL when set
 // (a read replica) and otherwise sharing the primary.
 func connectRead() *gorm.DB {

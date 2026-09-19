@@ -175,6 +175,58 @@
   .pr-merged{color:#bb9af7;border-color:#bb9af755;background:#bb9af71a}
   .pr-closed{color:#f7768e;border-color:#f7768e55;background:#f7768e1a}
   .pr-conflict{color:var(--red)}
+  .forkfrom{color:var(--dim)}
+  /* Review, checks and discussion. One shared section frame so the PR view reads as a
+     stack of related panels rather than four different widgets. */
+  .rvsect{border:1px solid var(--border);border-radius:6px;background:var(--card);padding:10px 12px;margin:10px 0}
+  .rvhead{display:flex;align-items:center;gap:8px;color:var(--textHi);font-weight:600;margin-bottom:8px}
+  .rvsum{font-weight:400;color:var(--dim)}
+  .rvrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0;border-top:1px solid var(--border)}
+  .rvrow:first-of-type{border-top:0}
+  .rv{font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:10px;border:1px solid var(--border);flex:none}
+  .rv-approved{color:#6cc644;border-color:#6cc64455;background:#6cc6441a}
+  .rv-changes_requested{color:#f7768e;border-color:#f7768e55;background:#f7768e1a}
+  .rv-commented{color:var(--dim)}
+  .rvwho{color:var(--text)}
+  /* A stale approval is dimmed, not hidden: it happened, it just no longer describes
+     the branch. Hiding it would make a reviewer's verdict vanish without explanation. */
+  .rvstale{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#e0af68;border:1px solid #e0af6855;background:#e0af681a;padding:2px 6px;border-radius:10px}
+  .rvbody{flex-basis:100%;color:var(--dim);white-space:pre-wrap;margin:2px 0 4px}
+  .rvbar{margin-top:10px;border-top:1px solid var(--border);padding-top:10px}
+  .rvbar textarea{width:100%;background:var(--bgAlt);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:7px 9px;font-family:var(--mono);font-size:13px;resize:vertical}
+  .rvbar textarea:focus{outline:0;border-color:var(--accent)}
+  .rvacts{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .ckrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0;border-top:1px solid var(--border)}
+  .ckrow:first-of-type{border-top:0}
+  .ck{font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:10px;border:1px solid var(--border);flex:none}
+  .ck-success{color:#6cc644;border-color:#6cc64455;background:#6cc6441a}
+  .ck-failure,.ck-error{color:#f7768e;border-color:#f7768e55;background:#f7768e1a}
+  .ck-pending{color:#e0af68;border-color:#e0af6855;background:#e0af681a}
+  .ckctx{color:var(--textHi)}
+  .ckdesc{color:var(--dim)}
+  .cklink{color:var(--accent);text-decoration:none}
+  .cklink:hover{text-decoration:underline}
+  .owner{color:var(--accent);background:var(--accentSoft);border:1px solid var(--accent);border-radius:10px;padding:1px 7px;font-size:11px}
+  .cmrow{padding:6px 0;border-top:1px solid var(--border)}
+  .cmrow:first-of-type{border-top:0}
+  .cmhead{color:var(--dim);font-size:11px;margin-bottom:2px}
+  .cmbody{white-space:pre-wrap}
+  .tagrow{display:flex;align-items:center;gap:10px;padding:7px 12px;border:1px solid var(--border);border-radius:5px;background:var(--card);margin-bottom:6px}
+  .tagname{color:var(--textHi);font-weight:600}
+  .tagdel{margin-left:auto}
+  .tagform{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .tagform input,.tagform select{background:var(--bgAlt);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:6px 9px;font-family:var(--mono);font-size:13px}
+  .tagform input:focus,.tagform select:focus{outline:0;border-color:var(--accent)}
+  .tagform #tag-msg{flex:1;min-width:220px}
+  .srchbar{display:flex;gap:8px;align-items:center}
+  .srchbar input{flex:1;background:var(--bgAlt);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:6px 9px;font-family:var(--mono);font-size:13px}
+  .srchbar input:focus{outline:0;border-color:var(--accent)}
+  .srchhead{color:var(--dim);margin:8px 0 4px}
+  .srow{padding:5px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card);margin-bottom:4px;cursor:pointer}
+  .srow:hover{border-color:var(--accent)}
+  .spath{color:var(--accent)}
+  .sline{color:var(--dim)}
+  .stext{white-space:pre;overflow:auto;color:var(--text);font-size:12px}
   .diff{border:1px solid var(--border);border-radius:5px;overflow:auto;max-height:calc(100vh - 300px);background:color-mix(in srgb, var(--bg) 74%, #000);font-family:var(--mono);font-size:18px;line-height:1.55}
   .diff .di{white-space:pre;padding:0 12px;color:var(--text);font-size:18px;line-height:1.55}
   /* Add/del keep only a background tint so the syntax token colours show through. */
@@ -459,7 +511,8 @@ function renderPane() {
   }
 
   crumb.innerHTML = `<span class="p">$</span> armory repos · ${esc(r.namespace)}/${esc(r.name)}`;
-  acts.innerHTML = `<button class="danger" data-del="${esc(r.id)}" data-name="${esc(r.name)}">delete</button>`;
+  acts.innerHTML = `<button data-fork="${esc(r.id)}" data-name="${esc(r.name)}">fork</button>
+    <button class="danger" data-del="${esc(r.id)}" data-name="${esc(r.name)}">delete</button>`;
 
   // Repo tabs, as every git platform does it: the code view is the landing page and
   // history is one click away, rather than a section buried under it.
@@ -468,7 +521,8 @@ function renderPane() {
     <button class="tab ${tab === 'code' ? 'active' : ''}" data-tab="code">code</button>
     <button class="tab ${tab === 'commits' ? 'active' : ''}" data-tab="commits">commits${
       n === undefined ? '' : `<span class="count">${n}</span>`}</button>
-    <button class="tab ${tab === 'pulls' ? 'active' : ''}" data-tab="pulls">pulls</button>`;
+    <button class="tab ${tab === 'pulls' ? 'active' : ''}" data-tab="pulls">pulls</button>
+    <button class="tab ${tab === 'tags' ? 'active' : ''}" data-tab="tags">tags</button>`;
   loadBranches(r.id);
 
   if (tab === 'commits') {
@@ -486,6 +540,13 @@ function renderPane() {
       if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
     }
     if (commitSha) loadCommit(r.id, commitSha); else loadCommitPage(r.id);
+    return;
+  }
+
+  if (tab === 'tags') {
+    pane.innerHTML = '<div id="tags"><div class="hint">→ loading tags · · ·</div></div>';
+    loadBranches(r.id);
+    loadTags(r.id);
     return;
   }
 
@@ -507,6 +568,14 @@ function renderPane() {
             <code>${esc(r.http_url)}</code>
             <button class="ghost" data-copy="${esc(r.http_url)}">copy</button>
           </div>
+        </div>
+        <div class="sect" id="search-sect">
+          <div class="srchbar">
+            <input id="srch-q" placeholder="search this repo (literal text)" autocomplete="off" spellcheck="false">
+            <button data-search="1">search</button>
+            <button class="ghost" data-search-clear="1">clear</button>
+          </div>
+          <div id="srch-results"></div>
         </div>
         <div class="sect" id="files-sect">
           <div id="filetree"><div class="hint">→ loading files · · ·</div></div>
@@ -952,12 +1021,114 @@ async function loadPull(id, number) {
   const busy = pullsEl(id);
   if (busy) busy.innerHTML = '<div class="hint">→ loading pull request · · ·</div>';
   try {
-    const res = await api(`${API}/${id}/pulls/${encodeURIComponent(number)}`);
-    paintPull(pullsEl(id), res);
+    const q = encodeURIComponent(number);
+    // The review layer is three more reads, fetched TOGETHER rather than in sequence:
+    // they are independent, and chaining them would show the diff and then pop the
+    // verdicts in afterwards. Each is tolerated as absent — a server without the
+    // review endpoints still renders a working pull request rather than an error.
+    const [res, reviews, comments, owners] = await Promise.all([
+      api(`${API}/${id}/pulls/${q}`),
+      api(`${API}/${id}/pulls/${q}/reviews`).catch(() => null),
+      api(`${API}/${id}/pulls/${q}/comments`).catch(() => null),
+      api(`${API}/${id}/codeowners?pull=${q}`).catch(() => null),
+    ]);
+    // Statuses hang off the source HEAD, which the reviews response is what reports —
+    // so this one genuinely is sequential.
+    let checks = null;
+    if (reviews && reviews.head) {
+      checks = await api(`${API}/${id}/commits/${encodeURIComponent(reviews.head)}/statuses`).catch(() => null);
+    }
+    paintPull(pullsEl(id), res, { reviews, comments, checks, owners });
   } catch (e) { const el = pullsEl(id); if (el) el.innerHTML = `<div class="err">could not load pull request — ${esc(e.message)}</div>`; }
 }
 
-function paintPull(el, res) {
+// A reviewer's current verdict, and whether it still speaks for the branch as it is
+// now. An approval is of a diff, so one given against an older head is shown as stale
+// rather than silently counted — the server may or may not discount it (that is the
+// rule's dismiss_stale setting), and the honest thing is to show what it is.
+function reviewRow(rv, head) {
+  const stale = rv.state === 'approved' && head && rv.commit_sha && rv.commit_sha !== head;
+  const label = { approved: 'approved', changes_requested: 'requested changes', commented: 'commented' }[rv.state] || rv.state;
+  return `<div class="rvrow">
+    <span class="rv rv-${esc(rv.state)}">${esc(label)}</span>
+    <span class="rvwho">${esc(rv.reviewer)}</span>
+    ${stale ? '<span class="rvstale" title="given against an earlier commit">stale</span>' : ''}
+    ${rv.body ? `<div class="rvbody">${esc(rv.body)}</div>` : ''}
+  </div>`;
+}
+
+function reviewsView(extra, open) {
+  const r = extra.reviews;
+  if (!r) return '';
+  const current = r.current || [];
+  const approvals = current.filter((v) => v.state === 'approved').length;
+  const blocking = current.some((v) => v.state === 'changes_requested');
+  const summary = [
+    `${approvals} approval${approvals === 1 ? '' : 's'}`,
+    blocking ? '<span class="pr-conflict">changes requested</span>' : '',
+  ].filter(Boolean).join(' · ');
+
+  // The action bar is only meaningful while the PR is open; a merged PR's verdicts are
+  // history.
+  const actions = open ? `<div class="rvbar">
+      <textarea id="rv-body" rows="2" placeholder="leave a review comment (optional)"></textarea>
+      <div class="rvacts">
+        <button data-review="approved">approve</button>
+        <button data-review="changes_requested">request changes</button>
+        <button data-review="commented">comment</button>
+      </div>
+    </div>` : '';
+
+  return `<div class="rvsect">
+    <div class="rvhead">reviews <span class="rvsum">${summary}</span></div>
+    ${current.length ? current.map((v) => reviewRow(v, r.head)).join('') : '<div class="hint">no reviews yet</div>'}
+    ${actions}
+  </div>`;
+}
+
+function checksView(extra) {
+  const c = extra.checks;
+  if (!c || !c.statuses || !c.statuses.length) return '';
+  const rows = c.statuses.map((s) => `<div class="ckrow">
+      <span class="ck ck-${esc(s.state)}">${esc(s.state)}</span>
+      <span class="ckctx">${esc(s.context)}</span>
+      ${s.description ? `<span class="ckdesc">${esc(s.description)}</span>` : ''}
+      ${s.target_url ? `<a class="cklink" href="${esc(s.target_url)}" target="_blank" rel="noreferrer noopener">details</a>` : ''}
+    </div>`).join('');
+  return `<div class="rvsect">
+    <div class="rvhead">checks <span class="rvsum"><span class="ck ck-${esc(c.state)}">${esc(c.state)}</span></span></div>
+    ${rows}
+  </div>`;
+}
+
+function ownersView(extra) {
+  const o = extra.owners;
+  if (!o || !o.found || !o.owners || !o.owners.length) return '';
+  return `<div class="rvsect">
+    <div class="rvhead">code owners</div>
+    <div class="cinfo">${o.owners.map((x) => `<span class="owner">${esc(x)}</span>`).join(' ')}</div>
+  </div>`;
+}
+
+function commentsView(extra, open) {
+  const list = extra.comments || [];
+  const rows = list.map((c) => `<div class="cmrow">
+      <div class="cmhead">${esc(c.author)}${c.path ? ` · <span class="sha">${esc(c.path)}${c.line ? ':' + c.line : ''}</span>` : ''}</div>
+      <div class="cmbody">${esc(c.body)}</div>
+    </div>`).join('');
+  const box = open ? `<div class="rvbar">
+      <textarea id="cm-body" rows="2" placeholder="add a comment"></textarea>
+      <div class="rvacts"><button data-comment="1">comment</button></div>
+    </div>` : '';
+  if (!list.length && !open) return '';
+  return `<div class="rvsect">
+    <div class="rvhead">discussion</div>
+    ${rows || '<div class="hint">nothing yet</div>'}
+    ${box}
+  </div>`;
+}
+
+function paintPull(el, res, extra = {}) {
   if (!el) return;
   const p = res.pull_request || res;
   const open = p.state === 'open';
@@ -968,7 +1139,7 @@ function paintPull(el, res) {
       <button class="danger" data-pr-close="${p.number}">close</button>
     </div>` : '';
   const meta = [
-    `${esc(p.source_ref)} → ${esc(p.target_ref)}`,
+    `${esc(p.source_ref)}${p.source_repo_id ? ' <span class="forkfrom">(fork)</span>' : ''} → ${esc(p.target_ref)}`,
     res.commits !== undefined ? `${res.commits} commit${res.commits === 1 ? '' : 's'}` : '',
     blocked ? `<span class="pr-conflict">cannot merge: ${esc(merge.reason || 'conflicts')}</span>` : '',
     p.merge_commit ? `merged as <span class="sha">${esc(p.merge_commit.slice(0, 8))}</span>` : '',
@@ -981,6 +1152,10 @@ function paintPull(el, res) {
       ${p.body ? `<pre class="cbody">${esc(p.body)}</pre>` : ''}
       ${actions}
     </div>
+    ${checksView(extra)}
+    ${reviewsView(extra, open)}
+    ${ownersView(extra)}
+    ${commentsView(extra, open)}
     ${res.diff !== undefined ? fileDiffView(res.files, res.diff)
       : (open ? '' : '<div class="hint">the review diff is shown while a pull request is open</div>')}`;
 }
@@ -1040,6 +1215,63 @@ async function loadComparePreview() {
   }
 }
 
+async function runSearch() {
+  const box = $('srch-results');
+  const q = (($('srch-q') || {}).value || '').trim();
+  if (!box) return;
+  if (!q) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="hint">→ searching · · ·</div>';
+  try {
+    const res = await api(`${API}/${selectedId}/search?q=${encodeURIComponent(q)}&ref=${encodeURIComponent(curRef())}`);
+    const hits = res.results || [];
+    if (!hits.length) { box.innerHTML = '<div class="hint">no matches</div>'; return; }
+    box.innerHTML = `
+      <div class="srchhead">${hits.length}${res.truncated ? '+' : ''} match${hits.length === 1 ? '' : 'es'}</div>
+      ${hits.map((h) => `<div class="srow" data-blob="${esc(h.path)}">
+          <span class="spath">${esc(h.path)}</span><span class="sline">:${h.line}</span>
+          <div class="stext">${esc(h.text)}</div>
+        </div>`).join('')}
+      ${res.truncated ? '<div class="hint">more matches were not shown — narrow the search</div>' : ''}`;
+  } catch (e) {
+    box.innerHTML = `<div class="err">search failed — ${esc(e.message)}</div>`;
+  }
+}
+
+const tagsEl = (id) => (selectedId === id && tab === 'tags' ? $('tags') : null);
+
+async function loadTags(id) {
+  try {
+    const list = await api(`${API}/${id}/tags`);
+    paintTags(tagsEl(id), list || []);
+  } catch (e) {
+    const el = tagsEl(id);
+    if (el) el.innerHTML = `<div class="err">could not load tags — ${esc(e.message)}</div>`;
+  }
+}
+
+function paintTags(el, list) {
+  if (!el) return;
+  const branches = branchCache.get(selectedId) || [];
+  const opts = branches.map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join('');
+  const rows = list.map((t) => `<div class="tagrow">
+      <span class="tagname">${esc(t.name)}</span>
+      <span class="sha">${esc((t.sha || '').slice(0, 8))}</span>
+      ${t.subject ? `<span class="ckdesc">${esc(t.subject)}</span>` : ''}
+      <button class="danger tagdel" data-tag-del="${esc(t.name)}">delete</button>
+    </div>`).join('');
+  el.innerHTML = `
+    <div class="rvsect">
+      <div class="rvhead">new tag</div>
+      <div class="tagform">
+        <input id="tag-name" placeholder="v1.0.0" autocomplete="off" spellcheck="false">
+        <select id="tag-ref">${opts}</select>
+        <input id="tag-msg" placeholder="release notes (optional — makes it annotated)" autocomplete="off">
+        <button data-tag-new="1">create</button>
+      </div>
+    </div>
+    ${list.length ? rows : '<div class="hint">no tags yet — tag a commit to mark a release</div>'}`;
+}
+
 // prAction posts a merge/close and re-renders the pull once it settles.
 async function prAction(number, verb) {
   try {
@@ -1048,7 +1280,14 @@ async function prAction(number, verb) {
     renderPane();
   } catch (e) {
     const el = $('pulls');
-    if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">${verb} failed — ${esc(e.message)}</div>`);
+    // A branch-protection refusal comes back as 409 "merge blocked: <reason>". It is an
+    // answer, not a failure, so it is not dressed up as one — reading "merge failed —
+    // 409 merge blocked" would suggest something went wrong rather than that the rule
+    // did its job.
+    const msg = /merge blocked/i.test(e.message)
+      ? esc(e.message.replace(/^\d+\s*/, ''))
+      : `${verb} failed — ${esc(e.message)}`;
+    if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">${msg}</div>`);
   }
 }
 
@@ -1133,6 +1372,104 @@ document.addEventListener('click', async (ev) => {
   if (mg && !mg.disabled) { prAction(mg.dataset.prMerge, 'merge'); return; }
   const cl = ev.target.closest('[data-pr-close]');
   if (cl) { prAction(cl.dataset.prClose, 'close'); return; }
+
+  // Reviews and comments. Both re-render the pull afterwards rather than patching the
+  // DOM: the verdict changes what the merge button is allowed to do, and deriving that
+  // here would be a second implementation of the server's rule.
+  const rv = ev.target.closest('[data-review]');
+  if (rv && !rv.disabled) {
+    const body = ($('rv-body') || {}).value || '';
+    rv.disabled = true;
+    try {
+      await api(`${API}/${selectedId}/pulls/${prNumber}/reviews`, {
+        method: 'POST',
+        body: JSON.stringify({ state: rv.dataset.review, body }),
+      });
+      renderPane();
+    } catch (e) {
+      rv.disabled = false;
+      const el = $('pulls');
+      if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">review failed — ${esc(e.message)}</div>`);
+    }
+    return;
+  }
+  const cmt = ev.target.closest('[data-comment]');
+  if (cmt && !cmt.disabled) {
+    const body = (($('cm-body') || {}).value || '').trim();
+    if (!body) return;
+    cmt.disabled = true;
+    try {
+      await api(`${API}/${selectedId}/pulls/${prNumber}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      });
+      renderPane();
+    } catch (e) {
+      cmt.disabled = false;
+      const el = $('pulls');
+      if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">comment failed — ${esc(e.message)}</div>`);
+    }
+    return;
+  }
+
+  // Fork: the copy lands in the caller's own namespace, so the rail is reloaded and the
+  // new repo selected — otherwise the button appears to do nothing.
+  if (ev.target.closest('[data-search]')) { runSearch(); return; }
+  if (ev.target.closest('[data-search-clear]')) {
+    const i = $('srch-q'); if (i) i.value = '';
+    const b = $('srch-results'); if (b) b.innerHTML = '';
+    return;
+  }
+
+  const fk = ev.target.closest('[data-fork]');
+  if (fk && !fk.disabled) {
+    fk.disabled = true;
+    try {
+      const made = await api(`${API}/${fk.dataset.fork}/fork`, { method: 'POST', body: JSON.stringify({}) });
+      await load(false);
+      if (made && made.id) { selectedId = made.id; renderRail(); renderPane(); }
+    } catch (e) {
+      $('pane').insertAdjacentHTML('afterbegin', `<div class="err">fork failed — ${esc(e.message)}</div>`);
+    } finally { fk.disabled = false; }
+    return;
+  }
+
+  const tn = ev.target.closest('[data-tag-new]');
+  if (tn && !tn.disabled) {
+    const name = (($('tag-name') || {}).value || '').trim();
+    if (!name) return;
+    tn.disabled = true;
+    try {
+      await api(`${API}/${selectedId}/tags`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          ref: ($('tag-ref') || {}).value || '',
+          message: (($('tag-msg') || {}).value || '').trim(),
+        }),
+      });
+      loadTags(selectedId);
+    } catch (e) {
+      tn.disabled = false;
+      const el = $('tags');
+      if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">could not create the tag — ${esc(e.message)}</div>`);
+    }
+    return;
+  }
+  const td = ev.target.closest('[data-tag-del]');
+  if (td) {
+    // A tag is what something was built from, so deleting one is confirmed by name
+    // rather than being a single misclick.
+    if (!confirm(`delete tag ${td.dataset.tagDel}?`)) return;
+    try {
+      await api(`${API}/${selectedId}/tags/${encodeURIComponent(td.dataset.tagDel)}`, { method: 'DELETE' });
+      loadTags(selectedId);
+    } catch (e) {
+      const el = $('tags');
+      if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">could not delete the tag — ${esc(e.message)}</div>`);
+    }
+    return;
+  }
 
   const pg = ev.target.closest('[data-page]');
   if (pg && !pg.disabled) {

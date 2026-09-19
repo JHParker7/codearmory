@@ -2052,7 +2052,16 @@
           "listStatus",
           "createStatus",
           "listProtection",
-          "setProtection"
+          "setProtection",
+          "commentPull",
+          "createTag",
+          "deleteTag",
+          "forkRepo",
+          "listStatus",
+          "listWebhook",
+          "reviewPull",
+          "setStatus",
+          "setWebhook"
         ],
         "resources": [
           "{username}/codearmory_git_factory/repos",

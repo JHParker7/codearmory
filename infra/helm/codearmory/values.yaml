@@ -8,9 +8,15 @@ nameOverride: ""
 fullnameOverride: ""
 
 # Registry prefix prepended to all codearmory service images.
-# Set to your registry host, e.g. "ghcr.io/myorg" or "registry.example.com/codearmory".
+# Set to your registry host, e.g. "docker.io/myuser" or "registry.example.com/codearmory".
 # Leave empty to use the repository value as-is.
-imageRegistry: "ghcr.io/code-armory-app"
+#
+# This must name the registry scripts/publish-images.sh pushes to (its NS), because
+# that script is what builds these images — the repository names below are exactly the
+# ones it publishes. Two consumers compose images from this same prefix but are NOT
+# built by that script: builder.reconcile.imageRegistry (the spun-off services) and
+# forge.gitImage (runner-git). Both are pinned explicitly below.
+imageRegistry: "docker.io/jhp73"
 
 # Default image tag applied to all services when the per-service tag is empty.
 imageTag: alpha-0.1.0
@@ -36,6 +42,14 @@ gatekeeper:
   image:
     repository: gatekeeper
     tag: ""
+  # Extra environment variables, appended last so they can override anything the chart
+  # sets. For settings with no first-class value — e.g. SIGNUP_RATE_LIMIT /
+  # SIGNUP_RATE_WINDOW / LOGIN_RATE_LIMIT, which an E2E deployment raises because every
+  # test client shares one source IP.
+  #   extraEnv:
+  #     - name: SIGNUP_RATE_LIMIT
+  #       value: "500"
+  extraEnv: []
   replicaCount: 1
   port: 8081
   resources:
@@ -211,6 +225,10 @@ portal:
   image:
     repository: portal
     tag: ""
+  # Sub-path the SPA is served from, e.g. "/app" when fronted by platformIngress. MUST
+  # match the PORTAL_BASE_PATH the image was BUILT with — see platformIngress. Empty
+  # serves the SPA at "/".
+  basePath: ""
   replicaCount: 1
   port: 3001
   # Upstream conductor base URL. Defaults to the in-cluster conductor Service.
@@ -347,9 +365,10 @@ forge:
   # The forge/git-clone step (and any checkout-only execution that supplies no image)
   # runs on a forge-controlled minimal git image — users never pick or maintain one.
   # Empty = the runner-git image at this chart's imageRegistry and forge image tag
-  # (e.g. ghcr.io/code-armory-app/runner-git:alpha-0.1.0), which the release pipeline
-  # builds in lockstep with forge. Override to pin a digest or point at a private
-  # mirror in an air-gapped install.
+  # (e.g. docker.io/jhp73/runner-git:alpha-0.1.0). scripts/publish-images.sh builds it
+  # in lockstep with forge from infra/runner-images/git, so leaving this empty is
+  # correct as long as that script is what populated imageRegistry. Override to pin a
+  # digest or point at a private mirror in an air-gapped install.
   gitImage: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
@@ -1274,6 +1293,12 @@ builder:
     # Per-service registry/tag/image (builder's API, or the codearmory_org_service
     # Terraform resource) override these and are what a CD pipeline should set; these
     # are the floor for anything that does not.
+    #
+    # Left empty on purpose: the builder-deployed services (argo, blueprints, chaos,
+    # mcp, notifications, gitea_integration) are being rewritten to publish to the same
+    # Docker Hub namespace as this chart's own images, so inheriting the chart-wide
+    # imageRegistry is correct rather than a divergence. Set it again the moment those
+    # pipelines publish somewhere else.
     imageRegistry: ""
     imageTag: ""
     # Replica floor for every builder-managed (non-core) workload. Builder always sets
@@ -1420,6 +1445,30 @@ tests:
     # sandboxes actually take. Set false if those nodes cannot admit the probe — the
     # answer is then a little weaker but still worth having.
     useSandboxRuntime: true
+# ── Platform ingress (single front door) ──────────────────────────────────────
+# One origin serving both halves of the platform, split by path, instead of the separate
+# per-service conductor/portal ingresses (which each need their own hostname):
+#
+#   /api/… → conductor  (prefix stripped — conductor's routes are /gatekeeper/… etc.)
+#   /app/… → portal     (not rewritten; the SPA is BUILT with this base — see below)
+#   /      → 308 redirect to /app
+#
+# IMPORTANT: serving the portal under /app is not purely an ingress concern. Vite bakes
+# the base path into every asset URL at build time, so the portal image must be built
+# with PORTAL_BASE_PATH=/app (a Dockerfile build arg) and the container must run with the
+# same value. Change one without the other and the app loads a blank page whose bundles
+# all 404. portal.basePath below sets the runtime half.
+platformIngress:
+  enabled: false
+  className: nginx
+  # A list of hostnames. An EMPTY string entry means a catch-all rule, which is what an
+  # IP-addressed or port-forwarded cluster needs — there is no name to match on.
+  hosts:
+    - ""
+  rootRedirectTo: /app
+  annotations: {}
+  tls: []
+
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
   enabled: true

@@ -158,8 +158,19 @@ func main() {
 	// In dev publicDir is absent — Vite serves the SPA on its own port and proxies
 	// /api here — so this server runs API-only.
 	if _, statErr := os.Stat(publicDir); statErr == nil {
-		mux.Handle("/", newSPAHandler(publicDir, limiter))
-		slog.Info("serving SPA statically", "dir", publicDir)
+		spa := newSPAHandler(publicDir, limiter)
+		if basePath == "" {
+			mux.Handle("/", spa)
+		} else {
+			// Mounted under a prefix: strip it before the file lookup, so /app/assets/x.js
+			// resolves to assets/x.js on disk. Both spellings are registered because a user
+			// following a link to "/app" (no trailing slash) must not 404 — StripPrefix on
+			// the bare form leaves an empty path, which the SPA handler resolves to
+			// index.html via its fallback, exactly as "/" would.
+			mux.Handle(basePath+"/", http.StripPrefix(basePath, spa))
+			mux.Handle(basePath, http.StripPrefix(basePath, spa))
+		}
+		slog.Info("serving SPA statically", "dir", publicDir, "base_path", basePath)
 	} else {
 		slog.Warn("SPA directory not found; serving API only (dev: run Vite separately and proxy /api here)", "dir", publicDir)
 	}

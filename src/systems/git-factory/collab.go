@@ -36,9 +36,20 @@ type RepoShare struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Access levels and the actions each carries. read is everything needed to browse and
-// clone; write adds pushing. Managing collaborators is NOT included at any level —
-// re-sharing someone else's repo stays with the owner.
+// Access levels and the actions each carries. read is everything needed to browse,
+// clone and take part in review; write adds pushing and landing changes. Managing
+// collaborators is NOT included at any level — re-sharing someone else's repo stays
+// with the owner, as do webhooks and transfer.
+//
+// REVIEWING IS A READ-LEVEL ACTION, deliberately. The merge gate refuses a
+// self-approval, so if reviewPull needed write access then a repo requiring one
+// approval could only be approved by someone who could already merge it unreviewed —
+// and a two-person repo where the other person has read access would be permanently
+// unmergeable. Being able to see a change is what qualifies you to comment on it.
+//
+// Keep this in step with the actions a repo's routes declare: an action added to the
+// manifest but missing here is grantable to the OWNER and to nobody else, which shows
+// up as a collaborator getting 404s on a repo they can otherwise use.
 var shareActions = map[string][]string{
 	"read":  {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "listPull", "getPull", "createPull", "listPullComment", "createPullComment", "listReview", "createReview", "listStatus"},
 	"write": {"getRepo", "listCommit", "getReadme", "listBranch", "listTag", "getTree", "getBlob", "getArchive", "readRepo", "writeRepo", "updateRepo", "setDefaultBranch", "listPull", "getPull", "createPull", "mergePull", "updatePull", "listPullComment", "createPullComment", "updatePullComment", "deletePullComment", "listReview", "createReview", "listStatus", "createStatus"},

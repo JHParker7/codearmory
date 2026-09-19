@@ -48,6 +48,12 @@ func handleEnsureMirror(w http.ResponseWriter, r *http.Request) {
 	case req.UpstreamURL == "":
 		http.Error(w, "upstream_url is required", http.StatusBadRequest)
 		return
+	case validateFetchURL(req.UpstreamURL) != nil:
+		// The URL becomes an argv element of `git fetch`, where a value starting with
+		// a dash is parsed as an OPTION — `--upload-pack=<cmd>` being one git executes.
+		// See validateFetchURL.
+		http.Error(w, "upstream_url is not a valid remote", http.StatusBadRequest)
+		return
 	case req.Owner == "":
 		http.Error(w, "owner is required", http.StatusBadRequest)
 		return

@@ -270,6 +270,13 @@ func main() {
 	mux.HandleFunc("POST /{ns}/{repo}/"+string(svcUploadPack), handleUploadPack)
 	mux.HandleFunc("POST /{ns}/{repo}/"+string(svcReceivePack), handleReceivePack)
 
+	// Git LFS. Part of the WIRE surface, not the JSON API: an LFS client is a git client
+	// and authenticates the same way, so these are authorised by authorizeGitRepo (read
+	// for download, write for upload) and never routed through conductor's RBAC.
+	mux.HandleFunc("POST /{ns}/{repo}/info/lfs/objects/batch", handleLFSBatch)
+	mux.HandleFunc("PUT /{ns}/{repo}/info/lfs/objects/{oid}", handleLFSUpload)
+	mux.HandleFunc("GET /{ns}/{repo}/info/lfs/objects/{oid}", handleLFSDownload)
+
 	// Internal pull-through-mirror surface (DESIGN-read-replicas.md §7). Called by
 	// git-connector, authenticated by GIT_FACTORY_INTERNAL_KEY — NOT part of the
 	// gatekeeper RBAC surface and never routed through Conductor.

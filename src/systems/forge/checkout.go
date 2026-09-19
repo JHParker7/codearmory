@@ -22,7 +22,7 @@ const (
 var gitImage string
 
 func initCheckoutConfig() {
-	gitImage = envOrDefault("FORGE_GIT_IMAGE", "ghcr.io/code-armory-app/runner-git:latest")
+	gitImage = envOrDefault("FORGE_GIT_IMAGE", "docker.io/jhp73/runner-git:latest")
 }
 
 var (

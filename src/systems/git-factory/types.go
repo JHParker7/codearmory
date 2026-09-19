@@ -52,6 +52,12 @@ type Repo struct {
 	// of truth is upstream, not a client push. An unset column on an old row reads as
 	// native, so existing repos are unaffected.
 	Kind string `gorm:"default:native" json:"kind"`
+	// ForkOf is the id of the repo this one was forked from, empty for a repo born
+	// here. It is provenance, not a live link: a fork owns its bytes outright and
+	// nothing here follows the pointer to fetch or sync. Deleting the source leaves
+	// this dangling on purpose — the fork's history is still its own, and cascading a
+	// delete into someone else's repo would be far worse than a stale id.
+	ForkOf string `gorm:"index;default:''" json:"fork_of,omitempty"`
 	// UpstreamURL is the source a mirror fetches from, stored WITHOUT credentials
 	// (userinfo stripped — see sanitizeUpstreamURL). The authenticated URL used to
 	// fetch is supplied per-request by the caller (git-connector) and never persisted;

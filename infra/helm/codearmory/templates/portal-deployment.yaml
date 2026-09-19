@@ -48,6 +48,13 @@ spec:
             # conductor Service; override via portal.conductorUrl.
             - name: CONDUCTOR_URL
               value: {{ .Values.portal.conductorUrl | default (printf "http://%s-conductor:%v" (include "codearmory.fullname" .) .Values.conductor.port) | quote }}
+            {{- with .Values.portal.basePath }}
+            # Sub-path the SPA is mounted at. Must equal the PORTAL_BASE_PATH the image
+            # was BUILT with — Vite bakes it into every asset URL, so a mismatch serves
+            # index.html and 404s every bundle it references.
+            - name: PORTAL_BASE_PATH
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.portal.env.metricsEnabled }}
             - name: METRICS_ENABLED
               value: "true"

@@ -115,17 +115,17 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid branch name", http.StatusBadRequest)
 		return
 	}
-	if req.SourceRef == req.TargetRef {
+	sourceRepoID := strings.TrimSpace(req.SourceRepoID)
+	crossRepo := sourceRepoID != "" && sourceRepoID != re.ID
+	if !crossRepo && req.SourceRef == req.TargetRef {
+		// Only a conflict within ONE repo. Across repos the same branch name on each
+		// side is the normal case ("my main into your main").
 		http.Error(w, "source and target must differ", http.StatusBadRequest)
 		return
 	}
-	// Both must exist — a PR from a branch that was never pushed is a typo, and
-	// catching it here beats a confusing failure at merge time.
-	for _, ref := range []string{req.SourceRef, req.TargetRef} {
-		if !branchExists(ctx, re.ID, ref) {
-			http.Error(w, "branch "+ref+" does not exist", http.StatusBadRequest)
-			return
-		}
+	if !branchExists(ctx, re.ID, req.TargetRef) {
+		http.Error(w, "branch "+req.TargetRef+" does not exist", http.StatusBadRequest)
+		return
 	}
 
 	// Optional author override: the caller has already passed the createPull check
@@ -146,6 +146,39 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		State: prOpen, Author: author, OpenedByUserID: openedBy,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
+
+	if crossRepo {
+		// The caller must be able to READ the source repo. Checked through the same
+		// gatekeeper path as any other access rather than trusting the id in the body —
+		// otherwise "open a PR from repo X" would be a way to copy a repo you cannot see
+		// into one you can, and then read its diff.
+		srcRepo, err := getRepoByID(ctx, sourceRepoID)
+		if err != nil {
+			http.Error(w, "source repository not found", http.StatusNotFound)
+			return
+		}
+		if _, _, ok := gatekeeperClient.CheckPermissions(ctx, &notFoundOnDeny{ResponseWriter: w}, r, "getRepo", resRepoOf(srcRepo)); !ok {
+			// notFoundOnDeny already answered; a denial reads as 404 so the existence of
+			// a private source repo is not confirmed.
+			return
+		}
+		if !branchExists(ctx, srcRepo.ID, req.SourceRef) {
+			http.Error(w, "branch "+req.SourceRef+" does not exist in the source repository", http.StatusBadRequest)
+			return
+		}
+		pr.SourceRepoID = srcRepo.ID
+		// Bring the commits across before the row exists, so a PR is never created
+		// pointing at objects this repo cannot see.
+		if err := fetchCrossRepo(ctx, re.ID, srcRepo.ID, req.SourceRef, pr.ID); err != nil {
+			slog.ErrorContext(ctx, "create pull: fetch fork ref", "Repo_id", re.ID, "source", srcRepo.ID, "error", err)
+			http.Error(w, "could not read the source branch", http.StatusBadGateway)
+			return
+		}
+	} else if !branchExists(ctx, re.ID, req.SourceRef) {
+		http.Error(w, "branch "+req.SourceRef+" does not exist", http.StatusBadRequest)
+		return
+	}
+
 	if err := connect().WithContext(ctx).Create(&pr).Error; err != nil {
 		slog.ErrorContext(ctx, "create pull", "Repo_id", re.ID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -301,7 +334,15 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	// for a squash — where one commit carries every file from the branch.
 	before := refSnapshot(ctx, re.ID)
 
-	sha, err := mergeBranches(ctx, re.ID, pr.TargetRef, pr.SourceRef, msg, userID)
+	// Same refresh as the read path: merge what the fork branch points at now.
+	if pr.crossRepo() {
+		if err := fetchCrossRepo(ctx, re.ID, pr.sourceRepo(), pr.SourceRef, pr.ID); err != nil {
+			slog.ErrorContext(ctx, "pull: could not refresh fork ref before merge", "Repo_id", re.ID, "error", err)
+			http.Error(w, "could not read the source branch", http.StatusBadGateway)
+			return
+		}
+	}
+	sha, err := mergeBranches(ctx, re.ID, pr.TargetRef, pr.localSourceRef(), msg, userID)
 	if err != nil {
 		// Conflicts and races are the caller's problem to resolve, not server errors.
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -329,7 +370,7 @@ func handleClosePull(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleClosePull")
 	defer span.End()
 
-	re, _, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "updatePull")
+	re, userID, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "updatePull")
 	if !ok {
 		return
 	}
