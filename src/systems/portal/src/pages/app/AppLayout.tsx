@@ -126,8 +126,9 @@ function NavItem({ to, label, badge, service, collapsed, icon, letter, desc }: {
     >
       <span style={{ width: 54, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
         {icon ? <Icon name={icon} />
-          // A single letter drawn as the glyph (no bell in the ~6KB nerd-font subset, so
-          // notifications/ uses a text 'N' to read distinct from events/'s bolt).
+          // A single character drawn as the glyph. The ~6KB nerd-font subset has no
+          // envelope, so notifications/ uses the Unicode envelope ✉ (U+2709), which
+          // renders from the system font — an email letter, not a bare text letter.
           : letter ? <span aria-hidden="true" style={{ fontSize: 16, fontWeight: 600, lineHeight: 1, fontFamily: T.mono }}>{letter}</span>
           : <span style={{ fontSize: 12 }}>{token}</span>}
         {badge && <span style={{ position: 'absolute', top: 9, right: 13, width: 5, height: 5, borderRadius: '50%', background: T.amber }} />}
@@ -157,6 +158,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   const dispatch = useAppDispatch();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState('');
+  const [newParent, setNewParent] = useState(''); // parent project SLUG, "" = top-level
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const newRef = useRef<HTMLInputElement>(null);
@@ -177,8 +179,9 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
     if (!slug) { setErr('invalid project name'); return; }
     setBusy(true); setErr('');
     try {
-      await createProject(token as string, slug, name);
+      await createProject(token as string, slug, name, newParent || undefined);
       await dispatch(fetchKnownProjects(token as string));
+      setNewParent('');
       choose(slug);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : 'create failed');
@@ -231,6 +234,15 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
               );
             })}
             <div style={{ height: 1, background: T.border }} />
+            {known.length > 0 && (
+              <div style={{ padding: '8px 10px 0' }}>
+                <select value={newParent} onChange={e => setNewParent(e.target.value)} disabled={busy}
+                  style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px', outline: 'none', cursor: 'pointer' }}>
+                  <option value="">parent: (none — top level)</option>
+                  {known.map(p => <option key={p.project_id} value={p.slug}>parent: {p.name || p.slug}</option>)}
+                </select>
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 6, padding: '8px 10px' }}>
               <input ref={newRef} value={creating} onChange={e => setCreating(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') submitNew(); if (e.key === 'Escape') { setOpen(false); setCreating(''); setErr(''); } }}
@@ -426,7 +438,7 @@ export function AppLayout() {
             <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navMini} icon="argo" />
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navMini} icon="forge" />
             <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navMini} icon="events" />
-            <NavItem to="/app/notifications" label="notifications/" desc="Send events to Slack, Discord, email" service="notifications" collapsed={navMini} letter="N" />
+            <NavItem to="/app/notifications" label="notifications/" desc="Send events to Slack, Discord, email" service="notifications" collapsed={navMini} letter="✉" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navMini} icon="containers" />
             <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navMini} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future

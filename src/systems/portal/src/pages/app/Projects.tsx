@@ -60,6 +60,7 @@ export function Projects() {
   const [showCreate, setShowCreate] = useState(false);
   const [newSlug, setNewSlug] = useState('');
   const [newName, setNewName] = useState('');
+  const [newParent, setNewParent] = useState(''); // parent project SLUG, "" = top-level
   const [creating, setCreating] = useState(false);
 
   // Inline member management (owned projects) — the expanded project id + its roster.
@@ -113,9 +114,9 @@ export function Projects() {
     if (!SLUG_RE.test(slug)) { setError('slug must match ^[a-z0-9][a-z0-9-]{0,62}$'); return; }
     setCreating(true); setError(null);
     try {
-      const p = await createProject(token, slug, name);
+      const p = await createProject(token, slug, name, newParent || undefined);
       setProjects(prev => [p, ...prev]);
-      setNewSlug(''); setNewName(''); setShowCreate(false);
+      setNewSlug(''); setNewName(''); setNewParent(''); setShowCreate(false);
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setCreating(false); }
   };
@@ -249,6 +250,14 @@ export function Projects() {
             <div style={{ flex: 1, minWidth: 200 }}>
               <div style={{ fontSize: 10, color: T.faint, marginBottom: 4 }}>NAME</div>
               <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Platform Team" onKeyDown={e => e.key === 'Enter' && handleCreate()} style={{ ...inputStyle }} />
+            </div>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 10, color: T.faint, marginBottom: 4 }}>PARENT</div>
+              <select value={newParent} onChange={e => setNewParent(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
+                <option value="">(none — top level)</option>
+                {projects.map(p => <option key={p.project_id} value={p.slug}>{p.name || p.slug}</option>)}
+              </select>
+              <div style={{ fontSize: 9, color: T.faint, marginTop: 3 }}>nests the project; pipelines here may target it</div>
             </div>
             <button onClick={handleCreate} disabled={creating || !newSlug.trim() || !newName.trim() || !SLUG_RE.test(newSlug.trim())} style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '8px 16px', cursor: 'pointer', opacity: (creating || !newSlug.trim() || !newName.trim() || !SLUG_RE.test(newSlug.trim())) ? 0.6 : 1 }}>{creating ? '…' : 'create'}</button>
           </div>

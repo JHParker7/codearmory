@@ -1682,10 +1682,9 @@ function RepoDetail({ repo, onDeleted, onChanged }: {
 /** Repos route: the repository rail (list + create) beside the selected repo's detail. */
 export function Repos() {
   const token = useAppSelector(s => s.auth.token)!;
+  // Scope is EXACT-PROJECT: the selected project shows only its OWN repos, never a
+  // parent's or a child's (project isolation — no hierarchy inheritance).
   const project = useAppSelector(s => s.project.current);
-  // The effective display scope: the selected project's slug plus its ancestors', so a
-  // child project shows repos it inherits from its parents (view/use, not edit).
-  const chain = useAppSelector(s => s.project.chain);
   const [repos, setRepos] = useState<GitFactoryRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1725,14 +1724,14 @@ export function Repos() {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return repos
-      .filter(r => (chain.length ? (!!r.project && chain.includes(r.project)) : true))
+      .filter(r => (project ? r.project === project : true))
       .filter(r => !q || r.name.toLowerCase().includes(q) || (r.namespace ?? '').toLowerCase().includes(q))
       .slice()
       .sort((a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime());
   }, [repos, project, query]);
 
-  // Resolve the path segments to a repo (from all accessible repos, not just the
-  // chain-filtered rail, so a deep link to an inherited/parent repo still resolves).
+  // Resolve the path segments to a repo from all accessible repos (not just the
+  // project-filtered rail), so a deep link still resolves whatever the current scope.
   const selected = repos.find(r => r.namespace === pOwner && (r.project || '-') === pProject && r.name === pName) ?? null;
 
   // Land on the first repo when nothing is selected, so the page opens on content

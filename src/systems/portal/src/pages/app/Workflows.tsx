@@ -679,31 +679,25 @@ function PipelinesTab() {
   // Current-project view filter — refetch whenever it changes so the list tracks
   // the sidebar switcher.
   const project = useAppSelector(s => s.project.current);
-  // Effective display scope: the selected project + its ancestors, so a child shows
-  // pipelines it inherits from its parents (view + run; the run executes under the
-  // child's own grants). Fetch unscoped and filter by the chain rather than the single
-  // ?project= slug, which would return only the child's own pipelines.
-  const chain = useAppSelector(s => s.project.chain);
-  const chainKey = chain.join('|');
+  // Scope is EXACT-PROJECT: the selected project shows only its OWN pipelines and runs,
+  // never a parent's or a child's (project isolation — no hierarchy inheritance).
 
-  // A run is in the current view's scope when its own project is in the chain (the
-  // selected project + its ancestors). Runs are fetched per-pipeline and a pipeline
-  // lives in a PARENT project, so without this a parent view would show a child
-  // project's runs — the same chain filter the pipeline list uses (below).
+  // A run is in scope when its own project equals the selected one (no project selected
+  // = all projects). Runs are fetched per-pipeline, so this keeps the view exact.
   const runInScope = useCallback(
-    (r: WorkflowRun) => !chain.length || (!!r.project && chain.includes(r.project)),
-    [chainKey], // eslint-disable-line react-hooks/exhaustive-deps
+    (r: WorkflowRun) => !project || r.project === project,
+    [project],
   );
 
   const fetchWorkflows = useCallback(async () => {
     setLoading(true); setError(null);
     try {
       const all = await listWorkflows(token);
-      setWorkflows(chain.length ? all.filter(w => !!w.project && chain.includes(w.project)) : all);
+      setWorkflows(project ? all.filter(w => w.project === project) : all);
     }
     catch (e: unknown) { setError((e as Error).message); }
     finally { setLoading(false); }
-  }, [token, chainKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token, project]);
 
   useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
 

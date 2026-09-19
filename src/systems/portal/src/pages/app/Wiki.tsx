@@ -15,7 +15,7 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { useAppSelector } from '../../store/hooks';
 import { Markdown } from './Repos';
-import { listWikiPages, getWikiPage, putWikiPage, deleteWikiPage } from '../../api/bff';
+import { listWikiPages, getWikiPage, putWikiPage, deleteWikiPage, listGitFactoryRepos, listGitFactoryPulls, mergeGitFactoryPull } from '../../api/bff';
 import type { WikiPageMeta, WikiPageType, WikiPagePayload } from '../../api/bff';
 
 const TYPES: WikiPageType[] = ['overview', 'architecture', 'contract', 'model', 'service', 'component', 'decision', 'ticket'];
@@ -44,14 +44,36 @@ export function Wiki() {
   // reading a page (focused on content) and peeks back open on hover. It stays
   // fully open on the Contents root and while editing, where you're navigating.
   const [railHover, setRailHover] = useState(false);
+  // A plan under review: an open PR on <project>-wiki from a plan/* branch to main. When
+  // present, the wiki READS and EDITS that branch (not main), so a human refines the
+  // architect's plan in place; merging the PR releases it to the build agents (split flow).
+  const [plan, setPlan] = useState<{ branch: string; number: number; repoId: string } | null>(null);
+  const planRef = plan?.branch;
 
   const loadManifest = useCallback(async (proj: string) => {
     setErr('');
-    try { setPages((await listWikiPages(token, proj)).pages ?? []); }
+    try { setPages((await listWikiPages(token, proj, planRef)).pages ?? []); }
     catch (e: unknown) { setErr(e instanceof Error ? e.message : 'failed to load'); setPages([]); }
-  }, [token]);
+  }, [token, planRef]);
 
   useEffect(() => { if (project) loadManifest(project); }, [project, loadManifest]);
+
+  // Detect an open plan PR for this project's wiki repo (source plan/* -> main).
+  useEffect(() => {
+    if (!project) { setPlan(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const repos = await listGitFactoryRepos(token);
+        const wr = (repos ?? []).find(r => r.name === `${project}-wiki`);
+        if (!wr) { if (!cancelled) setPlan(null); return; }
+        const pulls = await listGitFactoryPulls(token, wr.id);
+        const pr = (pulls ?? []).find(p => p.state === 'open' && p.target_ref === 'main' && p.source_ref.startsWith('plan/'));
+        if (!cancelled) setPlan(pr ? { branch: pr.source_ref, number: pr.number, repoId: wr.id } : null);
+      } catch { if (!cancelled) setPlan(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [token, project]);
 
   // Load the selected page's content. Land in the rendered view, not edit.
   useEffect(() => {
@@ -59,11 +81,11 @@ export function Wiki() {
     setCreating(false); setEditing(false);
     (async () => {
       try {
-        const p = await getWikiPage(token, project, pageId);
+        const p = await getWikiPage(token, project, pageId, planRef);
         setDraft({ id: p.id, type: p.type, stack: p.stack ?? 'shared', format: p.format, title: p.title, status: p.status, content: p.content });
       } catch (e: unknown) { setErr(e instanceof Error ? e.message : 'failed to load page'); }
     })();
-  }, [token, project, pageId]);
+  }, [token, project, pageId, planRef]);
 
   const openContents = () => { setPageId(null); setCreating(false); setEditing(false); setDraft(emptyDraft); setErr(''); };
   const newPage = () => { setCreating(true); setEditing(true); setPageId(null); setDraft(emptyDraft); setErr(''); };
@@ -75,11 +97,25 @@ export function Wiki() {
     setBusy(true); setErr('');
     try {
       const payload: WikiPagePayload = { type: draft.type, stack: draft.stack, format: draft.format, title: draft.title, status: draft.status, content: draft.content };
-      await putWikiPage(token, project, draft.id.trim(), payload);
+      await putWikiPage(token, project, draft.id.trim(), payload, plan?.branch);
       setCreating(false); setEditing(false);
       await loadManifest(project);
       setPageId(draft.id.trim());
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : 'save failed'); }
+    setBusy(false);
+  };
+
+  // Merge the plan PR: approves the architect's plan and (via the wiki-PR-merge trigger)
+  // fires the build phase. Ends plan-review mode; the wiki reverts to reading main.
+  const mergePlan = async () => {
+    if (!plan) return;
+    if (!(await confirm({ message: `Merge plan PR #${plan.number}? This approves the plan and starts the build.`, confirmLabel: 'merge & build' }))) return;
+    setBusy(true); setErr('');
+    try {
+      await mergeGitFactoryPull(token, plan.repoId, plan.number, 'merge plan: approved for build');
+      setPlan(null);
+      openContents();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : 'merge failed'); }
     setBusy(false);
   };
 
@@ -158,6 +194,12 @@ export function Wiki() {
 
       {/* Main pane */}
       <div style={{ flex: 1, overflow: 'auto' }}>
+        {plan && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, margin: '12px 20px 0', padding: '8px 12px', background: T.greenSoft, border: `1px solid ${T.green}`, borderRadius: 4, fontSize: 12.5 }}>
+            <span style={{ color: T.textHi }}>Reviewing plan — edits go to branch <code style={{ fontFamily: T.mono, color: T.green }}>{plan.branch}</code> (PR #{plan.number}), not main. Refine the pages, then merge to start the build.</span>
+            <button onClick={mergePlan} disabled={busy} style={{ ...btn, background: T.green, color: T.bg, borderColor: T.green, flexShrink: 0, fontWeight: 600 }}>{busy ? '…' : 'merge & build →'}</button>
+          </div>
+        )}
         {err && <div style={{ color: T.red, background: T.redSoft, padding: '6px 10px', margin: '12px 20px 0', borderRadius: 4, fontSize: 13 }}>{err}</div>}
 
         {editMode ? (
@@ -196,7 +238,7 @@ export function Wiki() {
               </div>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                 <button onClick={startEdit} style={btn}>edit</button>
-                <button onClick={del} disabled={busy} style={{ ...btn, background: T.redSoft, color: T.red, borderColor: T.red }}>delete</button>
+                {!plan && <button onClick={del} disabled={busy} style={{ ...btn, background: T.redSoft, color: T.red, borderColor: T.red }}>delete</button>}
               </div>
             </div>
             {draft.format === 'md' ? (

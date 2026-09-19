@@ -470,11 +470,9 @@ function ColumnsModal({ statuses, boardId, boardName, onChanged, onClose }: { st
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
   // The selected project scopes the board to that project's tickets (null = all).
+  // Scope is EXACT-PROJECT: the selected project shows only its OWN boards/tickets, never
+  // a parent's or child's. Fetch unscoped and filter to the current slug.
   const project = useAppSelector(s => s.project.current);
-  // Effective display scope: selected project + ancestors, so a child shows the boards
-  // and tickets it inherits from its parents. Fetch unscoped and filter by the chain.
-  const chain = useAppSelector(s => s.project.chain);
-  const chainKey = chain.join('|');
   const users = useUsers(token);
   // Derive the id→username map from the same catalog the assignee picker uses, to avoid a second fetch.
   const userNames = useMemo(() => Object.fromEntries(users.map(u => [u.user_id, u.username])), [users]);
@@ -553,15 +551,18 @@ export function Tickets() {
         listTickets(token),
         listBoards(token).catch(() => [] as Board[]),
       ]);
-      const inScope = (p?: string) => (chain.length ? (!!p && chain.includes(p)) : true);
+      const inScope = (p?: string) => (project ? p === project : true);
       setTickets(tk.filter(t => inScope(t.project)));
-      setBoards(bd.filter(b => inScope(b.project)));
+      // A projectless board is the shared "Default" that CLI/agent-created tickets land
+      // on; keep it visible in every project view (its cards are still project-filtered
+      // via `tickets` + board_id), otherwise a project's tickets have no board to render under.
+      setBoards(bd.filter(b => !b.project || inScope(b.project)));
     } catch (e: unknown) {
       if (!silent) setError((e as Error).message);
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [token, chainKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token, project]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -603,10 +604,16 @@ export function Tickets() {
 
   // Open/total for a board: prefer the server-computed counts (accurate beyond the
   // ticket-list page cap), falling back to the loaded tickets.
-  const boardCounts = useCallback((b: Board) => ({
-    open: b.open_count ?? tickets.filter(t => t.board_id === b.board_id && !isTerminal(t.status)).length,
-    total: b.total_count ?? tickets.filter(t => t.board_id === b.board_id).length,
-  }), [tickets]);
+  const boardCounts = useCallback((b: Board) => {
+    const local = {
+      open: tickets.filter(t => t.board_id === b.board_id && !isTerminal(t.status)).length,
+      total: tickets.filter(t => t.board_id === b.board_id).length,
+    };
+    // A projectless (shared) board's server counts span ALL projects; the local tally
+    // is already project-scoped, so use it to keep the badge honest (49, not 100).
+    if (!b.project) return local;
+    return { open: b.open_count ?? local.open, total: b.total_count ?? local.total };
+  }, [tickets]);
 
   const visibleTickets = useMemo(() => tickets.filter(t => t.board_id === board), [tickets, board]);
 

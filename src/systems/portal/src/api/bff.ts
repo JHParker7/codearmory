@@ -2155,15 +2155,21 @@ export interface WikiPagePayload {
 }
 
 /** The project's page index (manifest) — the machine index used for read-scoping. */
-export async function listWikiPages(token: string, project: string): Promise<WikiManifest> {
-  return req<WikiManifest>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages`, token);
+/** `ref` reads a plan branch's version of the index (for reviewing/refining a plan PR). */
+export async function listWikiPages(token: string, project: string, ref?: string): Promise<WikiManifest> {
+  const q = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  return req<WikiManifest>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages${q}`, token);
 }
-export async function getWikiPage(token: string, project: string, id: string): Promise<WikiPage> {
-  return req<WikiPage>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token);
+/** `ref` reads a plan branch's version of the page. */
+export async function getWikiPage(token: string, project: string, id: string, ref?: string): Promise<WikiPage> {
+  const q = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  return req<WikiPage>('GET', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}${q}`, token);
 }
-/** Create or update a page (a new git version). */
-export async function putWikiPage(token: string, project: string, id: string, payload: WikiPagePayload): Promise<WikiPage> {
-  return req<WikiPage>('PUT', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token, payload);
+/** Create or update a page (a new git version). `branch` writes to a plan branch (the
+ * change lands in the plan PR for review) instead of main. */
+export async function putWikiPage(token: string, project: string, id: string, payload: WikiPagePayload, branch?: string): Promise<WikiPage> {
+  const body = branch ? { ...payload, branch } : payload;
+  return req<WikiPage>('PUT', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token, body);
 }
 export async function deleteWikiPage(token: string, project: string, id: string): Promise<void> {
   return req<void>('DELETE', `/wiki/projects/${encodeURIComponent(project)}/pages/${encodeURIComponent(id)}`, token);
@@ -2354,9 +2360,11 @@ export function listOwnedProjects(token: string) {
   return req<Project[]>('GET', '/gatekeeper/projects', token);
 }
 
-/** Create a project. `slug` must match ^[a-z0-9][a-z0-9-]{0,62}$. */
-export function createProject(token: string, slug: string, name: string) {
-  return req<Project>('POST', '/gatekeeper/projects', token, { slug, name });
+/** Create a project. `slug` must match ^[a-z0-9][a-z0-9-]{0,62}$. `parent` is an
+ * existing project SLUG to nest under (its subtree bounds what pipelines may target);
+ * omit for a top-level project. */
+export function createProject(token: string, slug: string, name: string, parent?: string) {
+  return req<Project>('POST', '/gatekeeper/projects', token, { slug, name, ...(parent ? { parent } : {}) });
 }
 
 export function getProject(token: string, id: string) {
