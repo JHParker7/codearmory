@@ -46,8 +46,14 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := make([]Repository, len(repos))
-	for i, name := range repos {
-		result[i] = Repository{Name: name}
+	for i, full := range repos {
+		// Split on the first "/": namespace is the first path component, name the rest.
+		// The portal builds the tags URL from (namespace, name), so both must be set.
+		ns, name := "", full
+		if j := strings.Index(full, "/"); j >= 0 {
+			ns, name = full[:j], full[j+1:]
+		}
+		result[i] = Repository{Name: name, Namespace: ns, FullName: full}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -98,9 +104,27 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The portal expects an ARRAY of tag objects ({name, digest, size?, pushed_at?}),
+	// not the Docker-registry {name, tags:[strings]} shape — rendering .map() over the
+	// object crashed the page. Enrich each tag with its manifest digest (needed for the
+	// React key and the delete-by-digest action); a per-tag manifest lookup that fails
+	// degrades to an empty digest rather than failing the whole list.
+	type tagEntry struct {
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+	}
+	out := make([]tagEntry, 0, len(tl.Tags))
+	for _, t := range tl.Tags {
+		e := tagEntry{Name: t}
+		if m, merr := reg.getManifest(ctx, name, t); merr == nil {
+			e.Digest = m.Digest
+		}
+		out = append(out, e)
+	}
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tl) //nolint:errcheck
+	json.NewEncoder(w).Encode(out) //nolint:errcheck
 }
 
 func handleGetManifest(w http.ResponseWriter, r *http.Request) {
