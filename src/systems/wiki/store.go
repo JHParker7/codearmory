@@ -21,7 +21,16 @@ import (
 type Store interface {
 	GetManifest(ctx context.Context, project string) (Manifest, error)
 	GetPage(ctx context.Context, project, pageID string) (Page, error)
+	// GetManifestOnBranch / GetPageOnBranch read the page index / a page as they stand on
+	// a plan branch, so the portal editor can load the in-review version (branch=="" => main).
+	GetManifestOnBranch(ctx context.Context, project, branch string) (Manifest, error)
+	GetPageOnBranch(ctx context.Context, project, branch, pageID string) (Page, error)
 	PutPage(ctx context.Context, project string, p Page, msg string) (Page, error)
+	// PutPageOnBranch writes to a plan branch (created off main on first use) instead of
+	// main, for the review-before-merge plan flow. branch=="" behaves like PutPage.
+	PutPageOnBranch(ctx context.Context, project, branch string, p Page, msg string) (Page, error)
+	// OpenPlanPR opens a PR from a plan branch to main on the project's wiki repo.
+	OpenPlanPR(ctx context.Context, project, branch, title, body string) (PlanPR, error)
 	DeletePage(ctx context.Context, project, pageID, msg string) error
 	History(ctx context.Context, project, pageID string) ([]Commit, error)
 }
@@ -163,30 +172,59 @@ func (s *gitFactoryStore) repoID(ctx context.Context, project string) (string, e
 	return re.ID, nil
 }
 
-func (s *gitFactoryStore) readBlob(ctx context.Context, repoID, path string) (string, error) {
+func (s *gitFactoryStore) readBlob(ctx context.Context, repoID, ref, path string) (string, error) {
+	if ref == "" {
+		ref = "main"
+	}
 	var out struct {
 		Content string `json:"content"`
 	}
-	q := url.Values{"ref": {"main"}, "path": {path}}
+	q := url.Values{"ref": {ref}, "path": {path}}
 	if err := s.gf(ctx, http.MethodGet, "/repos/"+repoID+"/blob?"+q.Encode(), nil, &out); err != nil {
 		return "", err
 	}
 	return out.Content, nil
 }
 
-func (s *gitFactoryStore) writeBlob(ctx context.Context, repoID, path, content, msg string) error {
+// ensureBranch creates branch off main if it does not already exist. git-factory returns
+// 409 when the branch is already there, which is exactly the state we want, so it is not
+// an error. main (or empty) is a no-op.
+func (s *gitFactoryStore) ensureBranch(ctx context.Context, repoID, branch string) error {
+	if branch == "" || branch == "main" {
+		return nil
+	}
+	err := s.gf(ctx, http.MethodPost, "/repos/"+repoID+"/branches",
+		map[string]string{"name": branch, "from": "main"}, nil)
+	if err == nil || strings.Contains(err.Error(), ": 409:") {
+		return nil
+	}
+	return err
+}
+
+func (s *gitFactoryStore) writeBlob(ctx context.Context, repoID, ref, path, content, msg string) error {
+	if ref == "" {
+		ref = "main"
+	}
+	if err := s.ensureBranch(ctx, repoID, ref); err != nil {
+		return err
+	}
 	return s.gf(ctx, http.MethodPut, "/repos/"+repoID+"/blob",
-		map[string]string{"ref": "main", "path": path, "content": content, "message": msg}, nil)
+		map[string]string{"ref": ref, "path": path, "content": content, "message": msg}, nil)
 }
 
 func (s *gitFactoryStore) GetManifest(ctx context.Context, project string) (Manifest, error) {
+	return s.getManifest(ctx, project, "main")
+}
+
+// getManifest reads a project's page manifest from a specific ref (branch). "" → main.
+func (s *gitFactoryStore) getManifest(ctx context.Context, project, ref string) (Manifest, error) {
 	id, err := s.repoID(ctx, project)
 	if err != nil {
 		return Manifest{}, err
 	}
-	raw, err := s.readBlob(ctx, id, manifestPath)
+	raw, err := s.readBlob(ctx, id, ref, manifestPath)
 	if errors.Is(err, errNotFound) {
-		return Manifest{Project: project}, nil // fresh wiki: empty manifest
+		return Manifest{Project: project}, nil // fresh wiki / branch: empty manifest
 	}
 	if err != nil {
 		return Manifest{}, err
@@ -199,14 +237,37 @@ func (s *gitFactoryStore) GetManifest(ctx context.Context, project string) (Mani
 	return m, nil
 }
 
-func (s *gitFactoryStore) writeManifest(ctx context.Context, repoID string, m Manifest) error {
+func (s *gitFactoryStore) writeManifest(ctx context.Context, repoID, ref string, m Manifest) error {
 	m.Updated = time.Now().UTC()
 	b, _ := json.MarshalIndent(m, "", "  ")
-	return s.writeBlob(ctx, repoID, manifestPath, string(b), "chore(wiki): update manifest")
+	return s.writeBlob(ctx, repoID, ref, manifestPath, string(b), "chore(wiki): update manifest")
 }
 
 func (s *gitFactoryStore) GetPage(ctx context.Context, project, pageID string) (Page, error) {
-	m, err := s.GetManifest(ctx, project)
+	return s.getPage(ctx, project, "main", pageID)
+}
+
+// GetPageOnBranch reads a page as it stands on a plan branch, so a reviewer can see (and
+// the portal editor can load) the in-review version before merge. Falls back to main
+// when branch is empty or "main".
+func (s *gitFactoryStore) GetPageOnBranch(ctx context.Context, project, branch, pageID string) (Page, error) {
+	if branch == "" {
+		branch = "main"
+	}
+	return s.getPage(ctx, project, branch, pageID)
+}
+
+// GetManifestOnBranch returns the page index as it stands on a branch (the plan branch
+// lists the pages under review). Falls back to main when branch is empty.
+func (s *gitFactoryStore) GetManifestOnBranch(ctx context.Context, project, branch string) (Manifest, error) {
+	if branch == "" {
+		branch = "main"
+	}
+	return s.getManifest(ctx, project, branch)
+}
+
+func (s *gitFactoryStore) getPage(ctx context.Context, project, ref, pageID string) (Page, error) {
+	m, err := s.getManifest(ctx, project, ref)
 	if err != nil {
 		return Page{}, err
 	}
@@ -218,7 +279,7 @@ func (s *gitFactoryStore) GetPage(ctx context.Context, project, pageID string) (
 	if err != nil {
 		return Page{}, err
 	}
-	content, err := s.readBlob(ctx, id, meta.Path)
+	content, err := s.readBlob(ctx, id, ref, meta.Path)
 	if err != nil && !errors.Is(err, errNotFound) {
 		return Page{}, err
 	}
@@ -226,11 +287,33 @@ func (s *gitFactoryStore) GetPage(ctx context.Context, project, pageID string) (
 }
 
 func (s *gitFactoryStore) PutPage(ctx context.Context, project string, p Page, msg string) (Page, error) {
+	return s.putPage(ctx, project, "main", p, msg)
+}
+
+// PutPageOnBranch writes a page to a (plan) branch instead of main, creating the branch
+// off main on first write so it starts as a copy of the live wiki. This is how the
+// architect's plan lands on a branch a human reviews as a PR before it reaches main and
+// the build agents read it.
+func (s *gitFactoryStore) PutPageOnBranch(ctx context.Context, project, branch string, p Page, msg string) (Page, error) {
+	if branch == "" {
+		branch = "main"
+	}
+	return s.putPage(ctx, project, branch, p, msg)
+}
+
+func (s *gitFactoryStore) putPage(ctx context.Context, project, ref string, p Page, msg string) (Page, error) {
 	id, err := s.repoID(ctx, project)
 	if err != nil {
 		return Page{}, err
 	}
-	m, err := s.GetManifest(ctx, project)
+	// For a non-main branch, create it (off main) BEFORE reading the manifest so version
+	// bumping sees the live page set, not an empty branch.
+	if ref != "" && ref != "main" {
+		if err := s.ensureBranch(ctx, id, ref); err != nil {
+			return Page{}, err
+		}
+	}
+	m, err := s.getManifest(ctx, project, ref)
 	if err != nil {
 		return Page{}, err
 	}
@@ -246,13 +329,35 @@ func (s *gitFactoryStore) PutPage(ctx context.Context, project string, p Page, m
 	p.Updated = time.Now().UTC()
 	upsertPage(&m, p.PageMeta)
 	// write the page body, then the refreshed manifest (two commits; git holds both)
-	if err := s.writeBlob(ctx, id, p.Path, p.Content, msg); err != nil {
+	if err := s.writeBlob(ctx, id, ref, p.Path, p.Content, msg); err != nil {
 		return Page{}, err
 	}
-	if err := s.writeManifest(ctx, id, m); err != nil {
+	if err := s.writeManifest(ctx, id, ref, m); err != nil {
 		return Page{}, err
 	}
 	return p, nil
+}
+
+// OpenPlanPR opens a git-factory PR on the project's wiki repo from a plan branch to main,
+// so the architect's plan can be reviewed (and refined on the branch) before merge. If a PR
+// for that branch already exists, git-factory returns it / a conflict; the caller treats a
+// non-2xx as "already open" is NOT assumed here — callers should surface the error.
+func (s *gitFactoryStore) OpenPlanPR(ctx context.Context, project, branch, title, body string) (PlanPR, error) {
+	id, err := s.repoID(ctx, project)
+	if err != nil {
+		return PlanPR{}, err
+	}
+	var pr struct {
+		Number int    `json:"number"`
+		ID     string `json:"id"`
+		State  string `json:"state"`
+	}
+	err = s.gf(ctx, http.MethodPost, "/repos/"+id+"/pulls",
+		map[string]string{"title": title, "body": body, "source_ref": branch, "target_ref": "main"}, &pr)
+	if err != nil {
+		return PlanPR{}, err
+	}
+	return PlanPR{Number: pr.Number, RepoID: id, Repo: project + "-wiki", Namespace: s.namespace, Branch: branch, State: pr.State}, nil
 }
 
 func (s *gitFactoryStore) DeletePage(ctx context.Context, project, pageID, msg string) error {
@@ -268,7 +373,7 @@ func (s *gitFactoryStore) DeletePage(ctx context.Context, project, pageID, msg s
 		return errNotFound
 	}
 	removePage(&m, pageID)
-	return s.writeManifest(ctx, id, m)
+	return s.writeManifest(ctx, id, "main", m)
 }
 
 func (s *gitFactoryStore) History(ctx context.Context, project, pageID string) ([]Commit, error) {

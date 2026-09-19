@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -64,14 +65,82 @@ func handleWritePage(w http.ResponseWriter, r *http.Request) {
 		},
 		Content: req.Content,
 	}
-	saved, err := store.PutPage(ctx, project, page, "docs(wiki): update "+id)
+	var saved Page
+	var err error
+	if req.Branch != "" {
+		// Plan flow: write to a review branch (created off main on first use) instead of
+		// main, so the change lands in a PR a human reviews before it reaches the build.
+		if !branchNameOK(req.Branch) {
+			http.Error(w, "invalid branch", http.StatusBadRequest)
+			return
+		}
+		saved, err = store.PutPageOnBranch(ctx, project, req.Branch, page, "docs(wiki): update "+id)
+	} else {
+		saved, err = store.PutPage(ctx, project, page, "docs(wiki): update "+id)
+	}
 	if err != nil {
-		slog.ErrorContext(ctx, "write page", "project", project, "id", id, "error", err)
+		slog.ErrorContext(ctx, "write page", "project", project, "id", id, "branch", req.Branch, "error", err)
 		http.Error(w, "failed to write page", http.StatusInternalServerError)
 		return
 	}
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, saved)
+}
+
+// branchNameOK is a conservative allowlist for a plan branch name (git-factory validates
+// again server-side). Lets through e.g. "plan/run-<id>".
+func branchNameOK(b string) bool {
+	if b == "" || len(b) > 200 || strings.Contains(b, "..") {
+		return false
+	}
+	for _, r := range b {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '/' || r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// handlePublishPlan opens a PR from a plan branch to main on the project's wiki repo, so
+// the architect's plan can be reviewed (and refined on the branch) before merge releases
+// it to the build agents. POST /projects/{project}/plan/publish {branch,title?,body?}.
+func handlePublishPlan(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("wiki").Start(r.Context(), "handlePublishPlan")
+	defer span.End()
+
+	project := r.PathValue("project")
+	if !validSlug(project) {
+		http.Error(w, "invalid project", http.StatusBadRequest)
+		return
+	}
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "writePage", pagesResource(project)); !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	var req publishPlanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Branch == "main" || !branchNameOK(req.Branch) {
+		http.Error(w, "branch is required (a non-main plan branch)", http.StatusBadRequest)
+		return
+	}
+	title := req.Title
+	if title == "" {
+		title = "plan: " + project + " (review before build)"
+	}
+	pr, err := store.OpenPlanPR(ctx, project, req.Branch, title, req.Body)
+	if err != nil {
+		slog.ErrorContext(ctx, "publish plan", "project", project, "branch", req.Branch, "error", err)
+		http.Error(w, "failed to open plan PR: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	writeJSON(w, http.StatusOK, pr)
 }
 
 func handleGetPage(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +153,20 @@ func handleGetPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = userID
-	p, err := store.GetPage(ctx, project, id)
+	// ?ref=<plan branch> loads the in-review version so the portal editor can refine the
+	// plan on the branch. Held to the same allowlist as a write branch; absent/main reads main.
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	if ref != "" && ref != "main" && !branchNameOK(ref) {
+		http.Error(w, "invalid ref", http.StatusBadRequest)
+		return
+	}
+	var p Page
+	var err error
+	if ref != "" && ref != "main" {
+		p, err = store.GetPageOnBranch(ctx, project, ref, id)
+	} else {
+		p, err = store.GetPage(ctx, project, id)
+	}
 	if errors.Is(err, errNotFound) {
 		http.Error(w, "page not found", http.StatusNotFound)
 		return
@@ -106,7 +188,18 @@ func handleListPages(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listPage", pagesResource(project)); !ok {
 		return
 	}
-	m, err := store.GetManifest(ctx, project)
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	if ref != "" && ref != "main" && !branchNameOK(ref) {
+		http.Error(w, "invalid ref", http.StatusBadRequest)
+		return
+	}
+	var m Manifest
+	var err error
+	if ref != "" && ref != "main" {
+		m, err = store.GetManifestOnBranch(ctx, project, ref)
+	} else {
+		m, err = store.GetManifest(ctx, project)
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "list pages", "project", project, "error", err)
 		http.Error(w, "failed to list pages", http.StatusInternalServerError)

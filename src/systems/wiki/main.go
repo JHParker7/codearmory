@@ -90,6 +90,7 @@ func main() {
 	mux.HandleFunc("PUT /projects/{project}/pages/{id}", handleWritePage)
 	mux.HandleFunc("DELETE /projects/{project}/pages/{id}", handleDeletePage)
 	mux.HandleFunc("GET /projects/{project}/pages/{id}/history", handlePageHistory)
+	mux.HandleFunc("POST /projects/{project}/plan/publish", handlePublishPlan)
 
 	port := envOrDefault("PORT", "8110")
 	srv := &http.Server{

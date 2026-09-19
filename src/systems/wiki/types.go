@@ -104,5 +104,23 @@ type putPageRequest struct {
 	Status  string   `json:"status"`
 	Content string   `json:"content"`
 	Related []string `json:"related"`
-	Path    string   `json:"path"` // optional; defaulted from type+id+format when empty
+	Path    string   `json:"path"`   // optional; defaulted from type+id+format when empty
+	Branch  string   `json:"branch"` // optional; when set, write to this plan branch instead of main
+}
+
+// PlanPR identifies the pull request opened for a plan branch on a project's wiki repo.
+type PlanPR struct {
+	Number    int    `json:"number"`
+	RepoID    string `json:"repo_id"`
+	Repo      string `json:"repo"`      // <project>-wiki
+	Namespace string `json:"namespace"` // the wiki bot namespace the repo lives in
+	Branch    string `json:"branch"`
+	State     string `json:"state"`
+}
+
+// publishPlanRequest is the body of POST /projects/{project}/plan/publish.
+type publishPlanRequest struct {
+	Branch string `json:"branch"` // the plan branch to open a PR from (required)
+	Title  string `json:"title"`  // optional PR title
+	Body   string `json:"body"`   // optional PR body
 }
