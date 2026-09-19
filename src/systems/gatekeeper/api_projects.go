@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -23,17 +24,15 @@ var projectTiers = map[string][]string{
 	"admin":     {"*"},
 }
 
-// projectUseTiers is the USE-ONLY action set a CHILD project's members receive over each
-// ANCESTOR's namespace, implementing "inherit a parent's resources by reference: view
-// and run them, never edit them." It deliberately omits create*/update*/write*/delete* so
-// a child can list/read a parent's pipeline and TRIGGER a run (triggerRun ← "trigger*"),
-// but cannot modify or delete the parent's copy — mutate rights stay with the owning
-// project. Capped even for a child ADMIN: admin of a child is not admin of its parent.
-var projectUseTiers = map[string][]string{
-	"viewer":    {"read*", "list*", "get*"},
-	"developer": {"read*", "list*", "get*", "run*", "trigger*"},
-	"admin":     {"read*", "list*", "get*", "run*", "trigger*"},
-}
+// NOTE: project scoping is EXACT-PROJECT — a child project's members get NO access to an
+// ancestor's namespace, and a parent's members get none over a child's (per the product
+// decision that a parent's repos/resources must not be reachable from a child, nor the
+// inverse). The project TREE still exists (Project.ParentID) and still governs which
+// project a pipeline may TARGET (workflows pipelineMayTargetProject walks the ancestor
+// chain) — that "a bootstrap/parent pipeline may run for a descendant" path is the one
+// deliberate cross-project relationship kept, and the anchor for a future explicit
+// bootstrap/template concept. What was removed is the automatic cross-namespace *grant*
+// (the former projectUseTiers "use-only" inheritance).
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
@@ -60,7 +59,7 @@ func projectResource(slug string) string { return "project/" + slug + "/*" }
 // single "project/<slug>/*" pattern) and a Role holding it, owned by the project's first
 // admin. The project namespace is brand-new and belongs to no user, so this establishes
 // the roles directly without the confinement/attenuation the user-namespace path needs.
-func provisionTierRole(ctx context.Context, ownerID, slug, tier string, ancestors []Project) (string, error) {
+func provisionTierRole(ctx context.Context, ownerID, slug, tier string) (string, error) {
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Name:          "project:" + slug + ":" + tier,
@@ -73,46 +72,19 @@ func provisionTierRole(ctx context.Context, ownerID, slug, tier string, ancestor
 	if err := perm.Add(ctx); err != nil {
 		return "", err
 	}
-	permIDs := []string{perm.PermissionsID}
-	created := []Permissions{perm}
-	// Inheritance: grant this tier USE-ONLY access over every ancestor's namespace, so
-	// a child inherits the parent chain's resources by reference (view + run, never
-	// edit). The namespace wildcard means new parent resources are inherited too, and a
-	// parent edit propagates — no copies. On any failure, tear down what was created.
-	for _, anc := range ancestors {
-		up := Permissions{
-			PermissionsID: uuid.New().String(),
-			Name:          "project-use:" + slug + ":" + tier + ":" + anc.Slug,
-			Service:       "*",
-			Actions:       projectUseTiers[tier],
-			Resources:     []string{projectResource(anc.Slug)},
-			OwnerID:       ownerID,
-			Active:        true,
-		}
-		if err := up.Add(ctx); err != nil {
-			for _, c := range created {
-				_ = c.Remove(ctx)
-			}
-			return "", err
-		}
-		permIDs = append(permIDs, up.PermissionsID)
-		created = append(created, up)
-	}
 	role := Role{
 		RoleID:         uuid.New().String(),
 		Name:           "project/" + slug + "/" + tier,
-		PermissionsIDs: permIDs,
+		PermissionsIDs: []string{perm.PermissionsID},
 		OwnerID:        ownerID,
 		Active:         true,
 	}
 	if err := role.Add(ctx); err != nil {
-		// The permissions (a Service "*" wildcard over the project namespace, plus any
-		// ancestor use-grants) are reachable only through the role that was meant to carry
-		// them; leaving them behind accumulates unattached grants per attempt.
-		for _, c := range created {
-			if e := c.Remove(ctx); e != nil {
-				slog.ErrorContext(ctx, "provision tier role: orphaned permission left behind", "permission_id", c.PermissionsID, "error", e)
-			}
+		// The permission (a Service "*" wildcard over THIS project's namespace only) is
+		// reachable only through the role that was meant to carry it; leaving it behind
+		// accumulates an unattached grant per attempt.
+		if e := (Permissions{PermissionsID: perm.PermissionsID}).Remove(ctx); e != nil {
+			slog.ErrorContext(ctx, "provision tier role: orphaned permission left behind", "permission_id", perm.PermissionsID, "error", e)
 		}
 		return "", err
 	}
@@ -203,13 +175,13 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional parent: makes this a child in the project tree, so it inherits the
-	// parent's resources by reference. The parent must exist and be active, and the
-	// caller must be able to create within the parent's namespace (its admin/developer)
-	// — creating a child is administering the parent, not just a self-service act. No
-	// cycle is possible: the parent pre-exists and this is a fresh leaf.
+	// Optional parent: records this project's place in the tree (Project.ParentID). The
+	// parent must exist and be active, and the caller must be able to create within the
+	// parent's namespace (its admin/developer) — creating a child is administering the
+	// parent. The tree governs pipeline TARGETING (a parent's pipeline may run for a
+	// descendant), but grants NO resource access across the parent↔child boundary:
+	// scoping is exact-project, so nothing here provisions cross-namespace grants.
 	var parentID *string
-	var ancestors []Project // parent → root; the child inherits (use-only) from the whole chain
 	if req.Parent != nil && strings.TrimSpace(*req.Parent) != "" {
 		parentSlug := strings.TrimSpace(*req.Parent)
 		parent, perr := getProjectBySlug(ctx, parentSlug)
@@ -221,21 +193,6 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		parentID = &parent.ProjectID
-		ancestors = append(ancestors, parent)
-		seen := map[string]bool{parent.ProjectID: true}
-		for cur := parent; cur.ParentID != nil && *cur.ParentID != "" && !seen[*cur.ParentID]; {
-			row, gerr := (Project{ProjectID: *cur.ParentID}).Get(ctx)
-			if gerr != nil {
-				break
-			}
-			anc := row.(Project)
-			if !anc.Active {
-				break
-			}
-			ancestors = append(ancestors, anc)
-			seen[anc.ProjectID] = true
-			cur = anc
-		}
 	}
 
 	p := Project{
@@ -269,18 +226,18 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	// here rolls the whole creation back: the caller is told the project was not created,
 	// so no grant over its namespace — and no row holding its slug — may outlive the call.
 	var err error
-	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "viewer", ancestors); err != nil {
+	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "viewer"); err != nil {
 		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision viewer role", err)
 		return
 	}
-	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "developer", ancestors); err != nil {
+	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "developer"); err != nil {
 		discardTierRoles(ctx, p.ViewerRoleID)
 		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision developer role", err)
 		return
 	}
-	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "admin", ancestors); err != nil {
+	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "admin"); err != nil {
 		discardTierRoles(ctx, p.ViewerRoleID, p.DeveloperRoleID)
 		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision admin role", err)
@@ -295,6 +252,16 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	// The creator is the project's first admin.
 	_ = assignMembership(ctx, p.AdminRoleID, callerID, callerID)
+
+	// The wiki bot needs developer membership on every project so it can
+	// resolve the project through git-factory and list/write pages. Without
+	// this, wiki list-pages 500s ("unknown project") on any freshly created
+	// project. Env-gated so non-agent deployments don't grant a phantom user.
+	if botID := os.Getenv("WIKI_BOT_USER_ID"); botID != "" && botID != callerID {
+		if err := assignMembership(ctx, p.DeveloperRoleID, botID, callerID); err != nil {
+			slog.WarnContext(ctx, "wiki bot grant failed", "project_id", p.ProjectID, "bot", botID, "err", err)
+		}
+	}
 
 	slog.InfoContext(ctx, "project created", "project_id", p.ProjectID, "slug", req.Slug, "org", orgNS, "owner", callerID)
 	span.SetStatus(codes.Ok, "")
