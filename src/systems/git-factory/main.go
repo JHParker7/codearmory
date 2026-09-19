@@ -235,6 +235,7 @@ func main() {
 	mux.HandleFunc("GET /repos/{id}/commits/{sha}", handleCommit)
 	mux.HandleFunc("GET /repos/{id}/readme", handleGetReadme)
 	mux.HandleFunc("GET /repos/{id}/branches", handleListBranches)
+	mux.HandleFunc("POST /repos/{id}/branches", handleCreateBranch)
 	mux.HandleFunc("GET /repos/{id}/tags", handleListTags)
 	mux.HandleFunc("PUT /repos/{id}/default-branch", handleSetDefaultBranch)
 	mux.HandleFunc("GET /repos/{id}/tree", handleTree)

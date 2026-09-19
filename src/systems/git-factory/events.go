@@ -123,12 +123,21 @@ func notifyPush(ctx context.Context, re Repo, pusher string, refs []string, befo
 const pullRequestEvent = "repo.pull_request."
 
 // notifyPullRequest emits a PR lifecycle event. head is the source ref's tip commit
-// (the checks run on it); it may be empty if the branch could not be resolved. The
-// tenant is the repo OWNER, not the actor — a trigger belongs to whoever owns the
-// repo, exactly as notifyPush reasons.
-func notifyPullRequest(ctx context.Context, re Repo, action string, pr PullRequest, head string) {
+// (the checks run on it); it may be empty if the branch could not be resolved.
+//
+// The event tenant (Actor.UserID) selects whose triggers are evaluated. For opened/
+// closed it stays the repo OWNER — a repo's CI/review triggers belong to whoever owns
+// it, exactly as notifyPush reasons — by passing actorID "". For a MERGE, the caller
+// passes the MERGER's id: a merge is an action a person takes, and their automation
+// should be able to react even on a repo they don't own (e.g. a human merging a
+// bot-owned <project>-wiki plan PR to start the build phase). Owner-owned repos are
+// unaffected — there the merger is the owner.
+func notifyPullRequest(ctx context.Context, re Repo, action string, pr PullRequest, head, actorID string) {
 	if !eventsEnabled() {
 		return
+	}
+	if actorID == "" {
+		actorID = re.Owner
 	}
 	fields := map[string]any{
 		"repo_id":    re.ID,
@@ -151,7 +160,7 @@ func notifyPullRequest(ctx context.Context, re Repo, action string, pr PullReque
 		Type:    pullRequestEvent + action,
 		Source:  gitEventSource,
 		Subject: re.Namespace + "/" + re.Name,
-		Actor:   sdkevents.Actor{UserID: re.Owner},
+		Actor:   sdkevents.Actor{UserID: actorID},
 		Data:    fields,
 	}
 	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))

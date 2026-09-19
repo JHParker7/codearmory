@@ -916,6 +916,54 @@ func commitDetailFor(ctx context.Context, repoID, rev string) (*commitDetail, er
 // errNoChange means an edit's content matched the file already there — no commit made.
 var errNoChange = errors.New("file is unchanged")
 
+// errBranchExists is returned by createBranch when the target branch already exists.
+var errBranchExists = errors.New("branch already exists")
+
+// createBranch creates refs/heads/<name> at the commit that <base> resolves to (base
+// defaults to the repo's HEAD branch). Create-only: the empty old-value on update-ref
+// makes it fail if the ref already exists, so it never moves an existing branch. Mirrors
+// commitFileChange's exec-git style. Returns the commit the new branch points at.
+func createBranch(ctx context.Context, repoID, name, base string) (string, error) {
+	dir, err := localDirFor(ctx, repoID)
+	if err != nil {
+		return "", err
+	}
+	if base == "" {
+		base = headBranch(ctx, repoID)
+	}
+	if base == "" {
+		return "", fmt.Errorf("no base ref (repo has no default branch)")
+	}
+	resolve := func(ref string) (string, bool) {
+		var b bytes.Buffer
+		c := exec.CommandContext(ctx, gitBinary, "-C", dir, "rev-parse", "--verify", ref+"^{commit}")
+		c.Stdout = &b
+		if c.Run() != nil {
+			return "", false
+		}
+		return strings.TrimSpace(b.String()), true
+	}
+	commit, ok := resolve(base)
+	if !ok {
+		commit, ok = resolve("refs/heads/" + base)
+	}
+	if !ok {
+		return "", fmt.Errorf("base ref %q not found", base)
+	}
+	// Create-only: the empty old-value makes update-ref refuse if the ref already exists.
+	var errBuf bytes.Buffer
+	uref := exec.CommandContext(ctx, gitBinary, "-C", dir, "update-ref", "refs/heads/"+name, commit, "")
+	uref.Stderr = &errBuf
+	if err := uref.Run(); err != nil {
+		if _, exists := resolve("refs/heads/" + name); exists {
+			return "", errBranchExists
+		}
+		return "", fmt.Errorf("create branch %s: %w: %s", name, err, strings.TrimSpace(errBuf.String()))
+	}
+	slog.InfoContext(ctx, "branch created", "Repo_id", repoID, "branch", name, "base", base, "commit", commit)
+	return commit, nil
+}
+
 // commitFileChange writes content to path on branch as a new commit — a normal
 // fast-forward, so branch protections that only block force-push/delete never apply. It
 // builds the tree in a throwaway index (the bare repo is only touched by the final CAS

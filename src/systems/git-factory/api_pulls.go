@@ -155,7 +155,7 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 	// Announce the open so a trigger can run CI or a review on it. Detached (a slow
 	// events service must not hold the request), tenant = repo owner (notifyPullRequest).
 	head, _ := branchTip(ctx, re.ID, pr.SourceRef)
-	notifyPullRequest(ctx, re, "opened", pr, head)
+	notifyPullRequest(ctx, re, "opened", pr, head, "")
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusCreated, pr)
 }
@@ -202,18 +202,38 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := map[string]any{"pull_request": pr}
+	// The commit count, changed files, and diff of the PR. For an OPEN (or closed-
+	// unmerged) PR the live target..source range is right. Once MERGED, source is an
+	// ancestor of target so that range is empty — a merged PR would then report zero
+	// commits and no diff, and the portal would render it as if it carried nothing.
+	// Anchor on the merge commit's two parents instead (merge^1 = target before the
+	// merge, merge^2 = source tip at merge), which git preserves forever even if the
+	// source branch is later moved or deleted.
+	diffBase, diffHead := pr.TargetRef, pr.SourceRef
+	if pr.State == prMerged && pr.MergeCommit != "" {
+		diffBase, diffHead = pr.MergeCommit+"^1", pr.MergeCommit+"^2"
+	}
+	// Report a failure rather than omitting the key: a caller cannot distinguish
+	// "no files changed" from "we could not work it out" if the field is missing.
+	if changes, err := diffStat(ctx, re.ID, diffBase, diffHead); err == nil {
+		out["files"] = changes
+	} else {
+		out["files_error"] = err.Error()
+	}
+	if patch, err := diffPatch(ctx, re.ID, diffBase, diffHead); err == nil {
+		out["diff"] = patch // the full review diff
+	}
+	out["commits"] = commitsBetween(ctx, re.ID, diffBase, diffHead)
+	// The review verdict and whether this PR's target gates merge on it, so a caller
+	// knows both where the review stands and whether it is binding. Historical for a
+	// merged/closed PR, but still worth showing.
+	reviews := loadReviews(ctx, re.ID, pr.ID)
+	out["reviews"] = map[string]any{
+		"decision": decideReviews(reviews, pr.Author),
+		"required": reviewRequiredFor(ctx, re.ID, pr.TargetRef),
+		"reviews":  reviews,
+	}
 	if pr.State == prOpen {
-		// Report a failure rather than omitting the key: a caller cannot distinguish
-		// "no files changed" from "we could not work it out" if the field is missing.
-		if changes, err := diffStat(ctx, re.ID, pr.TargetRef, pr.SourceRef); err == nil {
-			out["files"] = changes
-		} else {
-			out["files_error"] = err.Error()
-		}
-		if patch, err := diffPatch(ctx, re.ID, pr.TargetRef, pr.SourceRef); err == nil {
-			out["diff"] = patch // the full review diff (target...source)
-		}
-		out["commits"] = commitsBetween(ctx, re.ID, pr.TargetRef, pr.SourceRef)
 		res, err := tryMerge(ctx, re.ID, pr.TargetRef, pr.SourceRef)
 		if err != nil {
 			res = mergeResult{Mergeable: false, Reason: err.Error()}
@@ -225,14 +245,6 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 		if sha, ok := branchTip(ctx, re.ID, pr.SourceRef); ok {
 			statuses := loadStatuses(ctx, re.ID, sha)
 			out["status"] = map[string]any{"sha": sha, "state": combinedState(statuses), "statuses": statuses}
-		}
-		// The review verdict and whether this PR's target gates merge on it, so a
-		// caller knows both where the review stands and whether it is binding.
-		reviews := loadReviews(ctx, re.ID, pr.ID)
-		out["reviews"] = map[string]any{
-			"decision": decideReviews(reviews, pr.Author),
-			"required": reviewRequiredFor(ctx, re.ID, pr.TargetRef),
-			"reviews":  reviews,
 		}
 	}
 	span.SetStatus(codes.Ok, "")
@@ -307,7 +319,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = touchRepo(ctx, re.ID)
 	notifyPush(ctx, re, userID, []string{pr.TargetRef}, before)
-	notifyPullRequest(ctx, re, "merged", pr, sha)
+	notifyPullRequest(ctx, re, "merged", pr, sha, userID)
 	slog.InfoContext(ctx, "pull request merged", "Repo_id", re.ID, "number", pr.Number, "commit", sha)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, pr)
@@ -337,7 +349,7 @@ func handleClosePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pr.State = prClosed
-	notifyPullRequest(ctx, re, "closed", pr, "")
+	notifyPullRequest(ctx, re, "closed", pr, "", "")
 	writeJSON(w, http.StatusOK, pr)
 }
 

@@ -815,6 +815,48 @@ func handleGetReadme(w http.ResponseWriter, r *http.Request) {
 
 // ── refs ────────────────────────────────────────────────────────────────────
 
+// handleCreateBranch creates a new branch from a base ref (default the repo's HEAD).
+// Body: {"name":"<branch>","from":"<base ref, optional>"}. Create-only: 409 if the
+// branch already exists. Used by the wiki service to open a plan branch on <project>-wiki.
+func handleCreateBranch(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleCreateBranch")
+	defer span.End()
+	re, _, ok := authorizeRepo(ctx, w, r, r.PathValue("id"), "writeRepo")
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		From string `json:"from"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.From = strings.TrimSpace(req.From)
+	if !branchNameRe.MatchString(req.Name) {
+		http.Error(w, "invalid branch name", http.StatusBadRequest)
+		return
+	}
+	if req.From != "" && !branchNameRe.MatchString(req.From) {
+		http.Error(w, "invalid base ref", http.StatusBadRequest)
+		return
+	}
+	commit, err := createBranch(ctx, re.ID, req.Name, req.From)
+	if err != nil {
+		if errors.Is(err, errBranchExists) {
+			http.Error(w, "branch already exists", http.StatusConflict)
+			return
+		}
+		slog.ErrorContext(ctx, "create branch", "Repo_id", re.ID, "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	writeJSON(w, http.StatusCreated, map[string]any{"name": req.Name, "commit": commit})
+}
+
 func handleListBranches(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleListBranches")
 	defer span.End()
